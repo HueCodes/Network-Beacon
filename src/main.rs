@@ -21,6 +21,7 @@
 mod analyzer;
 mod capture;
 mod error;
+mod tls_fingerprint;
 mod ui;
 
 use std::sync::atomic::Ordering;
