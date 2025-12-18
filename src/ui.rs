@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 
 use crate::analyzer::{AnalysisReport, FlowAnalysis, FlowClassification};
 use crate::error::Result;
+use crate::tls_fingerprint::TlsStatus;
 
 /// Terminal type alias for convenience.
 type Term = Terminal<CrosstermBackend<Stdout>>;
@@ -305,7 +306,7 @@ fn render_stats(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_flows_table(frame: &mut Frame, area: Rect, app: &mut App) {
-    let header_cells = ["Severity", "Source IP", "Dest IP:Port", "CV", "Interval", "Packets"]
+    let header_cells = ["Severity", "Source IP", "Dest IP:Port", "CV", "Interval", "TLS Fingerprint"]
         .iter()
         .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).bold()));
 
@@ -342,13 +343,16 @@ fn render_flows_table(frame: &mut Frame, area: Rect, app: &mut App) {
                     })
                     .unwrap_or_else(|| "N/A".to_string());
 
+                // TLS fingerprint display with color coding
+                let (tls_display, tls_style) = format_tls_fingerprint(flow);
+
                 Row::new(vec![
                     Cell::from(flow.classification.severity()).style(severity_style),
                     Cell::from(flow.flow_key.src_ip.to_string()),
                     Cell::from(format!("{}:{}", flow.flow_key.dst_ip, flow.flow_key.dst_port)),
                     Cell::from(cv_str),
                     Cell::from(interval_str),
-                    Cell::from(flow.packet_count.to_string()),
+                    Cell::from(tls_display).style(tls_style),
                 ])
             })
             .collect(),
@@ -363,7 +367,7 @@ fn render_flows_table(frame: &mut Frame, area: Rect, app: &mut App) {
             Constraint::Length(22),
             Constraint::Length(8),
             Constraint::Length(10),
-            Constraint::Length(10),
+            Constraint::Length(28),
         ],
     )
     .header(header)
@@ -393,6 +397,53 @@ fn render_flows_table(frame: &mut Frame, area: Rect, app: &mut App) {
         }),
         &mut app.scroll_state,
     );
+}
+
+/// Formats TLS fingerprint for display with appropriate color coding.
+/// Returns (display_string, style).
+fn format_tls_fingerprint(flow: &FlowAnalysis) -> (String, Style) {
+    match flow.tls_status {
+        TlsStatus::Fingerprinted => {
+            if let Some(ref fp) = flow.tls_fingerprint {
+                // Determine color based on known-good status and flow periodicity
+                let is_periodic = matches!(
+                    flow.classification,
+                    FlowClassification::HighlyPeriodic | FlowClassification::JitteredPeriodic
+                );
+
+                let style = if fp.is_known_good {
+                    // Known-good fingerprint - Green
+                    Style::default().fg(Color::Green)
+                } else if is_periodic {
+                    // Unknown fingerprint + periodic = RED (suspicious C2)
+                    Style::default().fg(Color::Red).bold()
+                } else {
+                    // Unknown but not periodic - Yellow (worth investigating)
+                    Style::default().fg(Color::Yellow)
+                };
+
+                // Truncate fingerprint for display (show first 24 chars)
+                let display = if fp.fingerprint.len() > 24 {
+                    format!("{}...", &fp.fingerprint[..24])
+                } else {
+                    fp.fingerprint.clone()
+                };
+
+                (display, style)
+            } else {
+                ("TLS (No FP)".to_string(), Style::default().fg(Color::DarkGray))
+            }
+        }
+        TlsStatus::TlsNoFingerprint => {
+            ("TLS (Resumed)".to_string(), Style::default().fg(Color::DarkGray))
+        }
+        TlsStatus::Plaintext => {
+            ("Plaintext".to_string(), Style::default().fg(Color::Gray))
+        }
+        TlsStatus::Unknown => {
+            ("N/A".to_string(), Style::default().fg(Color::DarkGray))
+        }
+    }
 }
 
 fn render_footer(frame: &mut Frame, area: Rect) {
@@ -487,7 +538,7 @@ fn render_help_overlay(frame: &mut Frame) {
 }
 
 fn render_detail_overlay(frame: &mut Frame, flow: &FlowAnalysis) {
-    let area = centered_rect(70, 50, frame.area());
+    let area = centered_rect(70, 70, frame.area());
 
     let severity_style = match flow.classification {
         FlowClassification::HighlyPeriodic => Style::default().fg(Color::Red).bold(),
@@ -495,7 +546,11 @@ fn render_detail_overlay(frame: &mut Frame, flow: &FlowAnalysis) {
         _ => Style::default().fg(Color::White),
     };
 
-    let detail_text = vec![
+    // Build TLS section
+    let (tls_fp_display, tls_fp_style) = format_tls_fingerprint(flow);
+    let tls_info = build_tls_detail_lines(flow);
+
+    let mut detail_text = vec![
         Line::from(vec![
             Span::styled("Classification: ", Style::default().fg(Color::Gray)),
             Span::styled(format!("{}", flow.classification), severity_style),
@@ -554,10 +609,27 @@ fn render_detail_overlay(frame: &mut Frame, flow: &FlowAnalysis) {
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Press Enter or Esc to close",
-            Style::default().fg(Color::DarkGray).italic(),
+            "TLS Information",
+            Style::default().bold().fg(Color::Cyan),
         )),
+        Line::from(vec![
+            Span::styled("TLS Status:     ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{}", flow.tls_status)),
+        ]),
+        Line::from(vec![
+            Span::styled("Fingerprint:    ", Style::default().fg(Color::Gray)),
+            Span::styled(tls_fp_display, tls_fp_style),
+        ]),
     ];
+
+    // Add additional TLS info if available
+    detail_text.extend(tls_info);
+
+    detail_text.push(Line::from(""));
+    detail_text.push(Line::from(Span::styled(
+        "Press Enter or Esc to close",
+        Style::default().fg(Color::DarkGray).italic(),
+    )));
 
     let detail = Paragraph::new(detail_text).block(
         Block::default()
@@ -568,6 +640,54 @@ fn render_detail_overlay(frame: &mut Frame, flow: &FlowAnalysis) {
 
     frame.render_widget(Clear, area);
     frame.render_widget(detail, area);
+}
+
+/// Builds additional TLS detail lines for the overlay.
+fn build_tls_detail_lines(flow: &FlowAnalysis) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    if let Some(ref fp) = flow.tls_fingerprint {
+        // TLS Version
+        lines.push(Line::from(vec![
+            Span::styled("TLS Version:    ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{}", fp.tls_version)),
+        ]));
+
+        // Cipher count
+        lines.push(Line::from(vec![
+            Span::styled("Cipher Suites:  ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{} offered", fp.cipher_count)),
+        ]));
+
+        // Extension count
+        lines.push(Line::from(vec![
+            Span::styled("Extensions:     ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{} present", fp.extension_count)),
+        ]));
+
+        // SNI if present
+        if let Some(ref sni) = fp.sni {
+            lines.push(Line::from(vec![
+                Span::styled("SNI:            ", Style::default().fg(Color::Gray)),
+                Span::raw(sni.clone()),
+            ]));
+        }
+
+        // Known-good status
+        let (status_text, status_style) = if fp.is_known_good {
+            let desc = fp.known_match.as_deref().unwrap_or("Known Client");
+            (format!("Yes ({})", desc), Style::default().fg(Color::Green))
+        } else {
+            ("No - Unknown Client".to_string(), Style::default().fg(Color::Yellow))
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled("Known Good:     ", Style::default().fg(Color::Gray)),
+            Span::styled(status_text, status_style),
+        ]));
+    }
+
+    lines
 }
 
 /// Helper to create a centered rectangle.
