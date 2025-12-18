@@ -1,0 +1,60 @@
+[package]
+name = "network-beacon"
+version = "0.1.0"
+edition = "2021"
+authors = ["Network Security Team"]
+description = "High-performance CLI tool for detecting C2 beaconing behavior via network flow analysis"
+license = "MIT"
+repository = "https://github.com/example/network-beacon"
+keywords = ["security", "network", "c2", "beacon", "detection"]
+categories = ["command-line-utilities", "network-programming"]
+
+[dependencies]
+# Packet capture and parsing
+pcap = "2.0"
+etherparse = "0.15"
+libc = "0.2"
+
+# Async runtime and concurrency
+tokio = { version = "1.35", features = ["full", "sync", "rt-multi-thread", "macros", "time"] }
+
+# Statistics
+statrs = "0.17"
+
+# CLI
+clap = { version = "4.4", features = ["derive", "env"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# TUI
+ratatui = "0.28"
+crossterm = "0.28"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Data structures
+lru = "0.12"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization (for potential export features)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[[bin]]
+name = "network-beacon"
+path = "src/main.rs"
