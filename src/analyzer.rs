@@ -29,10 +29,11 @@ use lru::LruCache;
 use statrs::statistics::{Data, Distribution, Max, Min, OrderStatistics};
 use tokio::sync::mpsc;
 use tokio::time::interval;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
-use crate::capture::{FlowEvent, FlowKey};
+use crate::capture::{FlowEvent, FlowKey, Protocol};
 use crate::error::Result;
+use crate::tls_fingerprint::{extract_fingerprint, is_tls_port, TlsFingerprint, TlsStatus};
 
 /// Classification of flow behavior based on CV analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,10 +225,17 @@ pub struct FlowData {
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
     pub last_analysis: Option<DetectionResult>,
+    /// TLS fingerprint extracted from Client Hello (if applicable).
+    pub tls_fingerprint: Option<TlsFingerprint>,
+    /// TLS status for this flow.
+    pub tls_status: TlsStatus,
 }
 
 impl FlowData {
     pub fn new(event: &FlowEvent) -> Self {
+        // Determine initial TLS status based on port and protocol
+        let (tls_fingerprint, tls_status) = Self::extract_tls_info(event);
+
         Self {
             flow_key: event.flow_key.clone(),
             timestamps: vec![event.timestamp],
@@ -236,7 +244,36 @@ impl FlowData {
             first_seen: event.timestamp,
             last_seen: event.timestamp,
             last_analysis: None,
+            tls_fingerprint,
+            tls_status,
         }
+    }
+
+    /// Extracts TLS fingerprint information from a flow event.
+    fn extract_tls_info(event: &FlowEvent) -> (Option<TlsFingerprint>, TlsStatus) {
+        // Check if this is a TLS port
+        if event.flow_key.protocol != Protocol::Tcp {
+            return (None, TlsStatus::Plaintext);
+        }
+
+        if !is_tls_port(event.flow_key.dst_port) {
+            return (None, TlsStatus::Plaintext);
+        }
+
+        // Try to extract TLS fingerprint from payload
+        if let Some(ref payload) = event.tls_payload {
+            if let Some(fingerprint) = extract_fingerprint(payload) {
+                trace!(
+                    "Extracted TLS fingerprint for {}: {}",
+                    event.flow_key,
+                    fingerprint.fingerprint
+                );
+                return (Some(fingerprint), TlsStatus::Fingerprinted);
+            }
+        }
+
+        // TLS port but no fingerprint (could be resumed session or encrypted)
+        (None, TlsStatus::TlsNoFingerprint)
     }
 
     /// Adds a new event to this flow's data.
@@ -245,6 +282,15 @@ impl FlowData {
         self.total_bytes += event.packet_size as u64;
         self.packet_count += 1;
         self.last_seen = event.timestamp;
+
+        // Try to extract TLS fingerprint if we don't have one yet
+        if self.tls_fingerprint.is_none() && self.tls_status != TlsStatus::Plaintext {
+            let (fp, status) = Self::extract_tls_info(event);
+            if fp.is_some() {
+                self.tls_fingerprint = fp;
+                self.tls_status = status;
+            }
+        }
     }
 
     /// Calculates interval deltas for this flow.
@@ -313,6 +359,10 @@ pub struct FlowAnalysis {
     pub packet_count: u64,
     pub total_bytes: u64,
     pub duration_secs: i64,
+    /// TLS fingerprint (if extracted).
+    pub tls_fingerprint: Option<TlsFingerprint>,
+    /// TLS status for display.
+    pub tls_status: TlsStatus,
 }
 
 /// The main flow analyzer - consumes FlowEvents and performs analysis.
@@ -391,6 +441,8 @@ impl FlowAnalyzer {
                         packet_count: flow_data.packet_count,
                         total_bytes: flow_data.total_bytes,
                         duration_secs: flow_data.duration().num_seconds(),
+                        tls_fingerprint: flow_data.tls_fingerprint.clone(),
+                        tls_status: flow_data.tls_status,
                     });
                 }
             }
