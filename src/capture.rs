@@ -1,7 +1,8 @@
 //! Packet capture module - The Producer in our Producer-Consumer architecture.
 //!
 //! This module handles raw packet capture using libpcap and extracts minimal
-//! flow metadata (FlowKey + timestamp) for downstream analysis.
+//! flow metadata (FlowKey + timestamp) for downstream analysis. For TCP packets
+//! on TLS ports, it also extracts the payload for TLS fingerprinting.
 
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,9 +14,10 @@ use chrono::{DateTime, Utc};
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
 use pcap::{Capture, Device};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::error::{CaptureError, Result};
+use crate::tls_fingerprint::is_tls_port;
 
 /// Unique identifier for a network flow.
 /// Composed of source IP, destination IP, and destination port.
@@ -77,6 +79,9 @@ pub struct FlowEvent {
     pub flow_key: FlowKey,
     pub timestamp: DateTime<Utc>,
     pub packet_size: u32,
+    /// TCP payload for TLS fingerprinting (only captured for TLS ports).
+    /// Limited to first 512 bytes to capture Client Hello without excess memory.
+    pub tls_payload: Option<Vec<u8>>,
 }
 
 /// Configuration for the packet capture.
@@ -219,7 +224,7 @@ impl PacketCapture {
         let sliced = SlicedPacket::from_ethernet(data).ok()?;
 
         // Extract IP addresses
-        let (src_ip, dst_ip) = match sliced.net {
+        let (src_ip, dst_ip) = match &sliced.net {
             Some(NetSlice::Ipv4(ipv4)) => {
                 let header = ipv4.header();
                 (
@@ -237,11 +242,51 @@ impl PacketCapture {
             _ => return None,
         };
 
-        // Extract transport layer info
-        let (dst_port, protocol) = match sliced.transport {
-            Some(TransportSlice::Tcp(tcp)) => (tcp.destination_port(), Protocol::Tcp),
-            Some(TransportSlice::Udp(udp)) => (udp.destination_port(), Protocol::Udp),
+        // Extract transport layer info and payload
+        let (dst_port, protocol, tcp_payload): (u16, Protocol, Option<&[u8]>) = match &sliced.transport {
+            Some(TransportSlice::Tcp(tcp)) => {
+                let port = tcp.destination_port();
+                // Get the payload after TCP header
+                let full_slice = data;
+                // Calculate where payload starts (ethernet + IP + TCP headers)
+                let eth_len = 14; // Standard Ethernet header
+                let ip_len = match &sliced.net {
+                    Some(NetSlice::Ipv4(ipv4)) => (ipv4.header().ihl() as usize) * 4,
+                    Some(NetSlice::Ipv6(_)) => 40, // IPv6 fixed header length
+                    _ => 0,
+                };
+                let tcp_header_len = tcp.data_offset() as usize * 4;
+                let payload_offset = eth_len + ip_len + tcp_header_len;
+
+                if payload_offset < full_slice.len() {
+                    (port, Protocol::Tcp, Some(&full_slice[payload_offset..]))
+                } else {
+                    (port, Protocol::Tcp, None)
+                }
+            }
+            Some(TransportSlice::Udp(udp)) => (udp.destination_port(), Protocol::Udp, None),
             _ => return None,
+        };
+
+        // Extract TLS payload for fingerprinting (only on TLS ports, TCP only)
+        // Limit to 512 bytes - enough for Client Hello, not excessive
+        let tls_payload: Option<Vec<u8>> = if protocol == Protocol::Tcp && is_tls_port(dst_port) {
+            tcp_payload.and_then(|p: &[u8]| {
+                if !p.is_empty() {
+                    // Check if this looks like a TLS handshake (Content Type 0x16)
+                    if p[0] == 0x16 {
+                        let len = p.len().min(512);
+                        trace!("Captured TLS payload: {} bytes on port {}", len, dst_port);
+                        Some(p[..len].to_vec())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
         };
 
         // Convert pcap timestamp to chrono DateTime
@@ -250,14 +295,16 @@ impl PacketCapture {
         let flow_key = FlowKey::new(src_ip, dst_ip, dst_port, protocol);
 
         debug!(
-            "Captured: {} -> {}:{} ({})",
-            src_ip, dst_ip, dst_port, protocol
+            "Captured: {} -> {}:{} ({}) tls_payload={}",
+            src_ip, dst_ip, dst_port, protocol,
+            tls_payload.as_ref().map(|p| p.len()).unwrap_or(0)
         );
 
         Some(FlowEvent {
             flow_key,
             timestamp,
             packet_size: data.len() as u32,
+            tls_payload,
         })
     }
 }
