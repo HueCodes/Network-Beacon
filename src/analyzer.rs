@@ -32,6 +32,9 @@ use tokio::time::interval;
 use tracing::{debug, info, trace};
 
 use crate::capture::{FlowEvent, FlowKey, Protocol};
+use crate::dns_detector::{
+    is_dns_port, parse_dns_query, DnsAnalysisResult, DnsDetector, DnsDetectorConfig, DnsFlowTracker,
+};
 use crate::error::Result;
 use crate::tls_fingerprint::{extract_fingerprint, is_tls_port, TlsFingerprint, TlsStatus};
 
@@ -180,12 +183,33 @@ pub struct IntervalStatistics {
 }
 
 /// Calculates comprehensive statistics for a set of intervals.
+/// Returns default values if the input is empty or has fewer than 2 elements.
 pub fn calculate_statistics(intervals_ms: &[f64]) -> IntervalStatistics {
+    // Guard against empty or single-element arrays
+    if intervals_ms.is_empty() {
+        return IntervalStatistics {
+            mean: 0.0,
+            std_dev: 0.0,
+            cv: f64::INFINITY,
+            min: 0.0,
+            max: 0.0,
+            median: 0.0,
+        };
+    }
+
     let mut data = Data::new(intervals_ms.to_vec());
 
     let mean = data.mean().unwrap_or(0.0);
     let std_dev = data.std_dev().unwrap_or(0.0);
-    let cv = if mean > 0.0 { std_dev / mean } else { f64::INFINITY };
+
+    // Handle edge cases in CV calculation
+    let cv = if mean > 0.0 && std_dev.is_finite() {
+        let computed_cv = std_dev / mean;
+        if computed_cv.is_finite() { computed_cv } else { f64::INFINITY }
+    } else {
+        f64::INFINITY
+    };
+
     let min = data.min();
     let max = data.max();
     let median = data.median();
@@ -229,12 +253,19 @@ pub struct FlowData {
     pub tls_fingerprint: Option<TlsFingerprint>,
     /// TLS status for this flow.
     pub tls_status: TlsStatus,
+    /// DNS flow tracker for tunneling detection (if DNS flow).
+    pub dns_tracker: Option<DnsFlowTracker>,
+    /// Latest DNS analysis result.
+    pub dns_analysis: Option<DnsAnalysisResult>,
 }
 
 impl FlowData {
     pub fn new(event: &FlowEvent) -> Self {
         // Determine initial TLS status based on port and protocol
         let (tls_fingerprint, tls_status) = Self::extract_tls_info(event);
+
+        // Initialize DNS tracker if this is a DNS flow
+        let dns_tracker = Self::init_dns_tracker(event);
 
         Self {
             flow_key: event.flow_key.clone(),
@@ -246,7 +277,26 @@ impl FlowData {
             last_analysis: None,
             tls_fingerprint,
             tls_status,
+            dns_tracker,
+            dns_analysis: None,
         }
+    }
+
+    /// Initializes DNS tracker if this is a DNS flow with payload
+    fn init_dns_tracker(event: &FlowEvent) -> Option<DnsFlowTracker> {
+        if event.flow_key.protocol != Protocol::Udp || !is_dns_port(event.flow_key.dst_port) {
+            return None;
+        }
+
+        let mut tracker = DnsFlowTracker::new();
+
+        if let Some(ref payload) = event.dns_payload {
+            if let Some(query) = parse_dns_query(payload) {
+                tracker.add_query(&query, event.timestamp);
+            }
+        }
+
+        Some(tracker)
     }
 
     /// Extracts TLS fingerprint information from a flow event.
@@ -289,6 +339,15 @@ impl FlowData {
             if fp.is_some() {
                 self.tls_fingerprint = fp;
                 self.tls_status = status;
+            }
+        }
+
+        // Update DNS tracker if this is a DNS flow
+        if let Some(ref mut tracker) = self.dns_tracker {
+            if let Some(ref payload) = event.dns_payload {
+                if let Some(query) = parse_dns_query(payload) {
+                    tracker.add_query(&query, event.timestamp);
+                }
             }
         }
     }
@@ -363,6 +422,10 @@ pub struct FlowAnalysis {
     pub tls_fingerprint: Option<TlsFingerprint>,
     /// TLS status for display.
     pub tls_status: TlsStatus,
+    /// DNS tunneling analysis result (if DNS flow).
+    pub dns_analysis: Option<DnsAnalysisResult>,
+    /// Detection indicators for this flow.
+    pub indicators: Vec<String>,
 }
 
 /// The main flow analyzer - consumes FlowEvents and performs analysis.
@@ -370,18 +433,23 @@ pub struct FlowAnalyzer {
     config: AnalyzerConfig,
     flows: LruCache<FlowKey, FlowData>,
     detector: Box<dyn Detector>,
+    dns_detector: DnsDetector,
     events_processed: u64,
 }
 
 impl FlowAnalyzer {
     pub fn new(config: AnalyzerConfig) -> Self {
         let detector = Box::new(CvDetector::new(config.min_samples));
-        let max_flows = std::num::NonZeroUsize::new(config.max_flows).unwrap();
+        let dns_detector = DnsDetector::new(DnsDetectorConfig::default());
+        // Ensure max_flows is at least 1 to prevent panic
+        let max_flows = std::num::NonZeroUsize::new(config.max_flows.max(1))
+            .expect("max(1) guarantees non-zero");
 
         Self {
             config,
             flows: LruCache::new(max_flows),
             detector,
+            dns_detector,
             events_processed: 0,
         }
     }
@@ -425,14 +493,57 @@ impl FlowAnalyzer {
 
                 active_count += 1;
 
-                // Perform analysis
+                // Perform CV-based analysis
                 let result = flow_data.analyze(self.detector.as_ref());
 
-                // Report suspicious flows (HighlyPeriodic or JitteredPeriodic)
-                if matches!(
+                // Perform DNS tunneling analysis if applicable
+                let dns_analysis = if let Some(ref tracker) = flow_data.dns_tracker {
+                    let analysis = self.dns_detector.analyze(tracker);
+                    flow_data.dns_analysis = Some(analysis.clone());
+                    Some(analysis)
+                } else {
+                    None
+                };
+
+                // Build indicators list
+                let mut indicators = Vec::new();
+
+                // CV-based indicators
+                let is_periodic = matches!(
                     result.classification,
                     FlowClassification::HighlyPeriodic | FlowClassification::JitteredPeriodic
-                ) {
+                );
+                if is_periodic {
+                    indicators.push("periodic_beacon".to_string());
+                }
+
+                // TLS indicators
+                if let Some(ref fp) = flow_data.tls_fingerprint {
+                    if !fp.is_known_good {
+                        indicators.push("unknown_tls_client".to_string());
+                    }
+                }
+
+                // DNS tunneling indicators
+                let dns_suspicious = dns_analysis.as_ref().map(|d| d.is_suspicious).unwrap_or(false);
+                if dns_suspicious {
+                    indicators.push("dns_tunneling".to_string());
+                    if let Some(ref dns) = dns_analysis {
+                        for indicator in &dns.indicators {
+                            let indicator_str = match indicator {
+                                crate::dns_detector::DnsIndicator::HighEntropy { .. } => "high_entropy_dns",
+                                crate::dns_detector::DnsIndicator::LongLabel { .. } => "long_dns_label",
+                                crate::dns_detector::DnsIndicator::HighQueryRate => "high_dns_query_rate",
+                                crate::dns_detector::DnsIndicator::SuspiciousRecordType { .. } => "suspicious_dns_qtype",
+                                crate::dns_detector::DnsIndicator::ManySubdomains { .. } => "many_unique_subdomains",
+                            };
+                            indicators.push(indicator_str.to_string());
+                        }
+                    }
+                }
+
+                // Report suspicious flows (periodic OR DNS tunneling)
+                if is_periodic || dns_suspicious {
                     suspicious_flows.push(FlowAnalysis {
                         flow_key: flow_data.flow_key.clone(),
                         classification: result.classification,
@@ -443,12 +554,15 @@ impl FlowAnalyzer {
                         duration_secs: flow_data.duration().num_seconds(),
                         tls_fingerprint: flow_data.tls_fingerprint.clone(),
                         tls_status: flow_data.tls_status,
+                        dns_analysis,
+                        indicators,
                     });
                 }
             }
         }
 
         // Sort suspicious flows by CV (lowest/most periodic first)
+        // DNS-only detections go last (they have no CV)
         suspicious_flows.sort_by(|a, b| {
             a.cv.unwrap_or(f64::MAX)
                 .partial_cmp(&b.cv.unwrap_or(f64::MAX))
