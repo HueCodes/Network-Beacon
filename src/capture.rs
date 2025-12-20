@@ -16,6 +16,7 @@ use pcap::{Capture, Device};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
+use crate::dns_detector::is_dns_port;
 use crate::error::{CaptureError, Result};
 use crate::tls_fingerprint::is_tls_port;
 
@@ -82,6 +83,9 @@ pub struct FlowEvent {
     /// TCP payload for TLS fingerprinting (only captured for TLS ports).
     /// Limited to first 512 bytes to capture Client Hello without excess memory.
     pub tls_payload: Option<Vec<u8>>,
+    /// UDP payload for DNS analysis (only captured for DNS ports).
+    /// Limited to 512 bytes (standard DNS query size).
+    pub dns_payload: Option<Vec<u8>>,
 }
 
 /// Configuration for the packet capture.
@@ -243,7 +247,7 @@ impl PacketCapture {
         };
 
         // Extract transport layer info and payload
-        let (dst_port, protocol, tcp_payload): (u16, Protocol, Option<&[u8]>) = match &sliced.transport {
+        let (dst_port, protocol, tcp_payload, udp_payload): (u16, Protocol, Option<&[u8]>, Option<&[u8]>) = match &sliced.transport {
             Some(TransportSlice::Tcp(tcp)) => {
                 let port = tcp.destination_port();
                 // Get the payload after TCP header
@@ -259,12 +263,31 @@ impl PacketCapture {
                 let payload_offset = eth_len + ip_len + tcp_header_len;
 
                 if payload_offset < full_slice.len() {
-                    (port, Protocol::Tcp, Some(&full_slice[payload_offset..]))
+                    (port, Protocol::Tcp, Some(&full_slice[payload_offset..]), None)
                 } else {
-                    (port, Protocol::Tcp, None)
+                    (port, Protocol::Tcp, None, None)
                 }
             }
-            Some(TransportSlice::Udp(udp)) => (udp.destination_port(), Protocol::Udp, None),
+            Some(TransportSlice::Udp(udp)) => {
+                let port = udp.destination_port();
+                // Calculate UDP payload offset
+                let eth_len = 14;
+                let ip_len = match &sliced.net {
+                    Some(NetSlice::Ipv4(ipv4)) => (ipv4.header().ihl() as usize) * 4,
+                    Some(NetSlice::Ipv6(_)) => 40,
+                    _ => 0,
+                };
+                let udp_header_len = 8; // UDP header is always 8 bytes
+                let payload_offset = eth_len + ip_len + udp_header_len;
+
+                let payload = if payload_offset < data.len() {
+                    Some(&data[payload_offset..])
+                } else {
+                    None
+                };
+
+                (port, Protocol::Udp, None, payload)
+            }
             _ => return None,
         };
 
@@ -289,8 +312,27 @@ impl PacketCapture {
             None
         };
 
+        // Extract DNS payload for tunneling detection (only on DNS ports, UDP only)
+        // Limit to 512 bytes (standard DNS query size limit)
+        let dns_payload: Option<Vec<u8>> = if protocol == Protocol::Udp && is_dns_port(dst_port) {
+            udp_payload.and_then(|p: &[u8]| {
+                if p.len() >= 12 {
+                    // DNS header is minimum 12 bytes
+                    let len = p.len().min(512);
+                    trace!("Captured DNS payload: {} bytes on port {}", len, dst_port);
+                    Some(p[..len].to_vec())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
         // Convert pcap timestamp to chrono DateTime
-        let timestamp = DateTime::from_timestamp(ts.tv_sec, (ts.tv_usec * 1000) as u32)?;
+        // Use saturating arithmetic to prevent overflow (tv_usec max is 999,999)
+        let nanos = (ts.tv_usec as u32).saturating_mul(1000);
+        let timestamp = DateTime::from_timestamp(ts.tv_sec, nanos)?;
 
         let flow_key = FlowKey::new(src_ip, dst_ip, dst_port, protocol);
 
@@ -305,6 +347,7 @@ impl PacketCapture {
             timestamp,
             packet_size: data.len() as u32,
             tls_payload,
+            dns_payload,
         })
     }
 }
