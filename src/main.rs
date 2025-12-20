@@ -20,20 +20,28 @@
 
 mod analyzer;
 mod capture;
+mod config;
+mod dns_detector;
 mod error;
+mod export;
+mod replay;
 mod tls_fingerprint;
 mod ui;
 
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use tokio::sync::mpsc;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::analyzer::{run_analyzer, AnalyzerConfig};
 use crate::capture::{list_devices, CaptureConfig, PacketCapture};
+use crate::config::Config;
+use crate::export::{export_report, OutputFormat};
+use crate::replay::{PcapReplay, ReplayConfig};
 use crate::ui::run_ui;
 
 /// Network-Beacon: C2 beacon detection through network flow analysis.
@@ -48,6 +56,25 @@ struct Cli {
     command: Commands,
 }
 
+/// CLI output format (used by clap)
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CliOutputFormat {
+    #[default]
+    Text,
+    Json,
+    Jsonl,
+}
+
+impl From<CliOutputFormat> for OutputFormat {
+    fn from(f: CliOutputFormat) -> Self {
+        match f {
+            CliOutputFormat::Text => OutputFormat::Text,
+            CliOutputFormat::Json => OutputFormat::Json,
+            CliOutputFormat::Jsonl => OutputFormat::JsonLines,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Start capturing and analyzing network traffic.
@@ -59,6 +86,10 @@ enum Commands {
         /// BPF filter expression (e.g., "tcp port 443").
         #[arg(short, long)]
         filter: Option<String>,
+
+        /// Path to TOML configuration file.
+        #[arg(short, long)]
+        config: Option<PathBuf>,
 
         /// Analysis interval in seconds.
         #[arg(short = 'n', long, default_value = "10")]
@@ -87,12 +118,43 @@ enum Commands {
         /// Disable TUI and output to stdout instead.
         #[arg(long)]
         no_ui: bool,
+
+        /// Output format when --no-ui is used.
+        #[arg(long, value_enum, default_value = "text")]
+        output: CliOutputFormat,
+    },
+
+    /// Replay a PCAP file for analysis.
+    Replay {
+        /// Path to the PCAP file.
+        #[arg(short, long)]
+        file: PathBuf,
+
+        /// Replay speed multiplier (0 = as fast as possible, 1 = realtime).
+        #[arg(short, long, default_value = "0")]
+        speed: f64,
+
+        /// Maximum events to replay (0 = unlimited).
+        #[arg(long, default_value = "0")]
+        max_events: usize,
+
+        /// Minimum samples required for CV calculation.
+        #[arg(short, long, default_value = "5")]
+        min_samples: usize,
+
+        /// Output format.
+        #[arg(short, long, value_enum, default_value = "text")]
+        output: CliOutputFormat,
+
+        /// Enable verbose logging.
+        #[arg(short, long)]
+        verbose: bool,
     },
 
     /// List available network interfaces.
     ListInterfaces,
 
-    /// Run analysis on a PCAP file (offline mode).
+    /// Analyze a PCAP file (legacy command, use 'replay' for more options).
     Analyze {
         /// Path to the PCAP file.
         #[arg(short, long)]
@@ -102,10 +164,13 @@ enum Commands {
         #[arg(short, long, default_value = "5")]
         min_samples: usize,
 
-        /// Output format: text, json.
-        #[arg(short, long, default_value = "text")]
-        output: String,
+        /// Output format.
+        #[arg(short, long, value_enum, default_value = "text")]
+        output: CliOutputFormat,
     },
+
+    /// Generate a default configuration file.
+    GenerateConfig,
 }
 
 #[tokio::main]
@@ -116,6 +181,7 @@ async fn main() -> Result<()> {
         Commands::Capture {
             interface,
             filter,
+            config,
             analysis_interval,
             min_samples,
             max_flows,
@@ -123,7 +189,11 @@ async fn main() -> Result<()> {
             channel_size,
             verbose,
             no_ui,
+            output,
         } => {
+            // Load config file if provided
+            let file_config = Config::load_or_default(config.as_deref());
+
             // Initialize logging
             let log_level = if verbose { Level::DEBUG } else { Level::INFO };
 
@@ -137,6 +207,10 @@ async fn main() -> Result<()> {
                     .context("Failed to set tracing subscriber")?;
             }
 
+            // CLI args override config file
+            let interface = interface.or(file_config.capture.interface);
+            let filter = filter.or(file_config.capture.filter);
+
             run_capture(
                 interface,
                 filter,
@@ -146,6 +220,34 @@ async fn main() -> Result<()> {
                 flow_ttl,
                 channel_size,
                 no_ui,
+                output.into(),
+            )
+            .await
+        }
+
+        Commands::Replay {
+            file,
+            speed,
+            max_events,
+            min_samples,
+            output,
+            verbose,
+        } => {
+            // Initialize logging
+            let log_level = if verbose { Level::DEBUG } else { Level::INFO };
+            let subscriber = FmtSubscriber::builder()
+                .with_max_level(log_level)
+                .with_target(false)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .context("Failed to set tracing subscriber")?;
+
+            run_replay(
+                &file,
+                speed,
+                max_events,
+                min_samples,
+                output.into(),
             )
             .await
         }
@@ -173,7 +275,12 @@ async fn main() -> Result<()> {
             min_samples,
             output,
         } => {
-            run_offline_analysis(&file, min_samples, &output).await
+            run_offline_analysis(&file, min_samples, output.into()).await
+        }
+
+        Commands::GenerateConfig => {
+            println!("{}", Config::generate_default());
+            Ok(())
         }
     }
 }
@@ -187,6 +294,7 @@ async fn run_capture(
     flow_ttl: u64,
     channel_size: usize,
     no_ui: bool,
+    output_format: OutputFormat,
 ) -> Result<()> {
     info!("Starting Network-Beacon capture...");
 
@@ -229,7 +337,7 @@ async fn run_capture(
 
     // Run UI or console output
     if no_ui {
-        run_console_output(report_rx, shutdown_handle.clone()).await?;
+        run_console_output(report_rx, shutdown_handle.clone(), output_format).await?;
     } else {
         // Run TUI - this blocks until user quits
         run_ui(report_rx).await?;
@@ -246,46 +354,86 @@ async fn run_capture(
     Ok(())
 }
 
+async fn run_replay(
+    file: &PathBuf,
+    speed: f64,
+    max_events: usize,
+    min_samples: usize,
+    output_format: OutputFormat,
+) -> Result<()> {
+    info!("Starting PCAP replay: {:?}", file);
+
+    let replay_config = ReplayConfig {
+        speed,
+        max_events,
+        channel_size: 10_000,
+    };
+
+    // Configure analyzer
+    let analyzer_config = AnalyzerConfig {
+        max_flows: 10_000,
+        max_timestamps_per_flow: 1000,
+        analysis_interval_secs: 5, // Faster for replay
+        min_samples,
+        flow_ttl_secs: 300,
+    };
+
+    // Create channels
+    let (report_tx, mut report_rx) = mpsc::channel(100);
+
+    // Start replay
+    let replay = PcapReplay::new(file.to_str().unwrap_or(""), replay_config);
+    let event_rx = replay.start()?;
+
+    // Start analyzer
+    let analyzer_handle = tokio::spawn(async move {
+        if let Err(e) = run_analyzer(event_rx, report_tx, analyzer_config).await {
+            error!("Analyzer error: {}", e);
+        }
+    });
+
+    // Collect reports
+    let mut last_report = None;
+    while let Some(report) = report_rx.recv().await {
+        last_report = Some(report);
+    }
+
+    // Wait for analyzer
+    let _ = analyzer_handle.await;
+
+    // Output final report
+    if let Some(report) = last_report {
+        println!("{}", export_report(&report, output_format));
+    } else {
+        println!("No data analyzed");
+    }
+
+    info!("Replay complete");
+    Ok(())
+}
+
 async fn run_console_output(
     mut report_rx: mpsc::Receiver<analyzer::AnalysisReport>,
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    output_format: OutputFormat,
 ) -> Result<()> {
     use tokio::signal;
 
-    println!("Network-Beacon - Console Mode");
-    println!("Press Ctrl+C to stop\n");
+    if output_format == OutputFormat::Text {
+        println!("Network-Beacon - Console Mode");
+        println!("Press Ctrl+C to stop\n");
+    }
 
     loop {
         tokio::select! {
             Some(report) = report_rx.recv() => {
-                println!("--- Analysis Report ---");
-                println!("Time: {}", report.timestamp.format("%Y-%m-%d %H:%M:%S"));
-                println!("Total Flows: {}", report.total_flows);
-                println!("Active Flows: {}", report.active_flows);
-                println!("Events Processed: {}", report.events_processed);
-
-                if report.suspicious_flows.is_empty() {
-                    println!("Suspicious Flows: None detected");
-                } else {
-                    println!("\nSuspicious Flows ({}):", report.suspicious_flows.len());
-                    for flow in &report.suspicious_flows {
-                        println!(
-                            "  [{:8}] {} -> {}:{} | CV: {:.4} | Interval: {:.1}ms | Packets: {}",
-                            flow.classification.severity(),
-                            flow.flow_key.src_ip,
-                            flow.flow_key.dst_ip,
-                            flow.flow_key.dst_port,
-                            flow.cv.unwrap_or(0.0),
-                            flow.mean_interval_ms.unwrap_or(0.0),
-                            flow.packet_count,
-                        );
-                    }
-                }
-                println!();
+                println!("{}", export_report(&report, output_format));
             }
 
             _ = signal::ctrl_c() => {
-                println!("\nReceived Ctrl+C, shutting down...");
+                if output_format == OutputFormat::Text {
+                    println!("\nReceived Ctrl+C, shutting down...");
+                }
                 shutdown.store(true, Ordering::Relaxed);
                 break;
             }
@@ -295,14 +443,20 @@ async fn run_console_output(
     Ok(())
 }
 
-async fn run_offline_analysis(file: &str, min_samples: usize, output: &str) -> Result<()> {
+async fn run_offline_analysis(
+    file: &str,
+    min_samples: usize,
+    output_format: OutputFormat,
+) -> Result<()> {
     use pcap::Capture;
     use std::collections::HashMap;
 
     use crate::analyzer::{calculate_statistics, timestamps_to_deltas, FlowClassification};
     use crate::capture::{FlowKey, Protocol};
 
-    println!("Analyzing PCAP file: {}", file);
+    if output_format == OutputFormat::Text {
+        println!("Analyzing PCAP file: {}", file);
+    }
 
     let mut cap = Capture::from_file(file).context("Failed to open PCAP file")?;
 
@@ -337,7 +491,7 @@ async fn run_offline_analysis(file: &str, min_samples: usize, output: &str) -> R
 
             let ts = chrono::DateTime::from_timestamp(
                 packet.header.ts.tv_sec,
-                (packet.header.ts.tv_usec * 1000) as u32,
+                (packet.header.ts.tv_usec as u32).saturating_mul(1000),
             );
 
             if let Some(timestamp) = ts {
@@ -367,8 +521,8 @@ async fn run_offline_analysis(file: &str, min_samples: usize, output: &str) -> R
     });
 
     // Output results
-    match output {
-        "json" => {
+    match output_format {
+        OutputFormat::Json => {
             let json_results: Vec<_> = results
                 .iter()
                 .map(|(key, class, stats, count)| {
@@ -385,7 +539,21 @@ async fn run_offline_analysis(file: &str, min_samples: usize, output: &str) -> R
                 .collect();
             println!("{}", serde_json::to_string_pretty(&json_results)?);
         }
-        _ => {
+        OutputFormat::JsonLines => {
+            for (key, class, stats, count) in &results {
+                let json_obj = serde_json::json!({
+                    "flow": key.to_string(),
+                    "classification": format!("{}", class),
+                    "severity": class.severity(),
+                    "cv": stats.cv,
+                    "mean_interval_ms": stats.mean,
+                    "std_dev_ms": stats.std_dev,
+                    "sample_count": count,
+                });
+                println!("{}", serde_json::to_string(&json_obj)?);
+            }
+        }
+        OutputFormat::Text => {
             println!("\nAnalysis Results ({} flows):\n", results.len());
             println!(
                 "{:<50} {:>10} {:>8} {:>12} {:>8}",
