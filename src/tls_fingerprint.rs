@@ -200,11 +200,11 @@ pub fn extract_fingerprint(payload: &[u8]) -> Option<TlsFingerprint> {
                         let ext_type = get_extension_type(&ext);
                         client_hello.extensions.push(ext_type);
 
-                        // Extract SNI if present
+                        // Extract SNI if present (with validation)
                         if let TlsExtension::SNI(ref sni_list) = ext {
                             for (_, name) in sni_list {
                                 if let Ok(s) = std::str::from_utf8(name) {
-                                    client_hello.sni = Some(s.to_string());
+                                    client_hello.sni = validate_sni(s);
                                 }
                             }
                         }
@@ -350,6 +350,28 @@ fn check_known_fingerprint(fingerprint: &str) -> (bool, Option<String>) {
     }
 
     (false, None)
+}
+
+/// Validates and sanitizes an SNI hostname.
+/// Returns None if the SNI is invalid or potentially malicious.
+fn validate_sni(sni: &str) -> Option<String> {
+    // DNS hostnames have a max length of 253 characters
+    if sni.is_empty() || sni.len() > 253 {
+        return None;
+    }
+
+    // Only allow valid DNS characters: alphanumeric, hyphens, and dots
+    // Also allow underscores as they appear in some internal hostnames
+    if !sni.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_') {
+        return None;
+    }
+
+    // Must not start or end with a dot or hyphen
+    if sni.starts_with('.') || sni.ends_with('.') || sni.starts_with('-') || sni.ends_with('-') {
+        return None;
+    }
+
+    Some(sni.to_string())
 }
 
 /// Checks if a destination port is likely TLS traffic.
