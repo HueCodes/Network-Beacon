@@ -63,6 +63,7 @@ pub static KNOWN_GOOD_FINGERPRINTS: &[KnownFingerprint] = &[
 pub struct KnownFingerprint {
     pub fingerprint: &'static str,
     pub description: &'static str,
+    #[allow(dead_code)] // Available for detailed logging
     pub vendor: &'static str,
 }
 
@@ -87,6 +88,7 @@ pub struct TlsFingerprint {
 
 impl TlsFingerprint {
     /// Checks if this fingerprint is suspicious when combined with high periodicity.
+    #[allow(dead_code)] // Available for custom detection logic
     pub fn is_suspicious(&self, is_periodic: bool) -> bool {
         !self.is_known_good && is_periodic
     }
@@ -186,11 +188,7 @@ pub fn extract_fingerprint(payload: &[u8]) -> Option<TlsFingerprint> {
             client_hello.version = Some(hello.version);
 
             // Extract cipher suites
-            client_hello.cipher_suites = hello
-                .ciphers
-                .iter()
-                .map(|c| c.0)
-                .collect();
+            client_hello.cipher_suites = hello.ciphers.iter().map(|c| c.0).collect();
 
             // Parse extensions if present
             if let Some(ext_data) = hello.ext {
@@ -211,10 +209,8 @@ pub fn extract_fingerprint(payload: &[u8]) -> Option<TlsFingerprint> {
 
                         // Extract supported versions (for TLS 1.3 detection)
                         if let TlsExtension::SupportedVersions(ref versions) = ext {
-                            client_hello.supported_versions = versions
-                                .iter()
-                                .map(|v| v.0)
-                                .collect();
+                            client_hello.supported_versions =
+                                versions.iter().map(|v| v.0).collect();
                         }
                     }
                 }
@@ -246,9 +242,7 @@ pub fn extract_fingerprint(payload: &[u8]) -> Option<TlsFingerprint> {
 
     debug!(
         "Extracted TLS fingerprint: {} (SNI: {:?}, known: {})",
-        fingerprint,
-        client_hello.sni,
-        is_known_good
+        fingerprint, client_hello.sni, is_known_good
     );
 
     Some(TlsFingerprint {
@@ -317,11 +311,7 @@ fn generate_fingerprint(
     let ext_hash = hash_component(&ext_str);
 
     // Compose final fingerprint
-    format!("{}_{}_{}",
-        version.short_code(),
-        cipher_hash,
-        ext_hash
-    )
+    format!("{}_{}_{}", version.short_code(), cipher_hash, ext_hash)
 }
 
 /// Hashes a component string and returns first 12 hex characters.
@@ -362,7 +352,10 @@ fn validate_sni(sni: &str) -> Option<String> {
 
     // Only allow valid DNS characters: alphanumeric, hyphens, and dots
     // Also allow underscores as they appear in some internal hostnames
-    if !sni.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_') {
+    if !sni
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
         return None;
     }
 
@@ -389,6 +382,7 @@ pub enum TlsStatus {
     /// Not a TLS port - plaintext traffic.
     Plaintext,
     /// Unknown protocol on unusual port.
+    #[allow(dead_code)] // For future protocol classification
     Unknown,
 }
 
@@ -438,7 +432,10 @@ mod tests {
         let fp1 = generate_fingerprint(&version, &ciphers1, &extensions);
         let fp2 = generate_fingerprint(&version, &ciphers2, &extensions);
 
-        assert_ne!(fp1, fp2, "Different ciphers should produce different fingerprints");
+        assert_ne!(
+            fp1, fp2,
+            "Different ciphers should produce different fingerprints"
+        );
     }
 
     #[test]
@@ -451,7 +448,10 @@ mod tests {
         let fp1 = generate_fingerprint(&version, &ciphers1, &extensions);
         let fp2 = generate_fingerprint(&version, &ciphers2, &extensions);
 
-        assert_eq!(fp1, fp2, "Cipher order should not affect fingerprint (sorted)");
+        assert_eq!(
+            fp1, fp2,
+            "Cipher order should not affect fingerprint (sorted)"
+        );
     }
 
     #[test]
