@@ -74,17 +74,6 @@ impl FlowClassification {
             Self::Insufficient => "UNKNOWN",
         }
     }
-
-    /// Returns a color hint for UI rendering.
-    pub fn color_hint(&self) -> &'static str {
-        match self {
-            Self::HighlyPeriodic => "red",
-            Self::JitteredPeriodic => "yellow",
-            Self::Moderate => "blue",
-            Self::Stochastic => "green",
-            Self::Insufficient => "gray",
-        }
-    }
 }
 
 impl std::fmt::Display for FlowClassification {
@@ -101,6 +90,7 @@ impl std::fmt::Display for FlowClassification {
 
 /// Trait for beacon detection algorithms.
 /// Allows for extensibility with different detection strategies.
+#[allow(dead_code)] // Trait interface for extensibility
 pub trait Detector: Send + Sync {
     /// Analyzes a series of intervals and returns a detection result.
     fn analyze(&self, intervals_ms: &[f64]) -> DetectionResult;
@@ -115,7 +105,9 @@ pub struct DetectionResult {
     pub classification: FlowClassification,
     pub cv: Option<f64>,
     pub mean_interval_ms: Option<f64>,
+    #[allow(dead_code)] // Available for detailed reporting
     pub std_dev_ms: Option<f64>,
+    #[allow(dead_code)] // Available for detailed reporting
     pub sample_count: usize,
 }
 
@@ -177,8 +169,11 @@ pub struct IntervalStatistics {
     pub mean: f64,
     pub std_dev: f64,
     pub cv: f64,
+    #[allow(dead_code)] // Available for extended statistics output
     pub min: f64,
+    #[allow(dead_code)] // Available for extended statistics output
     pub max: f64,
+    #[allow(dead_code)] // Available for extended statistics output
     pub median: f64,
 }
 
@@ -205,7 +200,11 @@ pub fn calculate_statistics(intervals_ms: &[f64]) -> IntervalStatistics {
     // Handle edge cases in CV calculation
     let cv = if mean > 0.0 && std_dev.is_finite() {
         let computed_cv = std_dev / mean;
-        if computed_cv.is_finite() { computed_cv } else { f64::INFINITY }
+        if computed_cv.is_finite() {
+            computed_cv
+        } else {
+            f64::INFINITY
+        }
     } else {
         f64::INFINITY
     };
@@ -301,29 +300,39 @@ impl FlowData {
 
     /// Extracts TLS fingerprint information from a flow event.
     fn extract_tls_info(event: &FlowEvent) -> (Option<TlsFingerprint>, TlsStatus) {
-        // Check if this is a TLS port
+        // Must be TCP for TLS
         if event.flow_key.protocol != Protocol::Tcp {
             return (None, TlsStatus::Plaintext);
         }
 
-        if !is_tls_port(event.flow_key.dst_port) {
-            return (None, TlsStatus::Plaintext);
-        }
-
-        // Try to extract TLS fingerprint from payload
+        // Try to extract TLS fingerprint from payload (capture already validated it looks like TLS)
+        // This works for both standard TLS ports AND non-standard ports (protocol mismatch detection)
         if let Some(ref payload) = event.tls_payload {
             if let Some(fingerprint) = extract_fingerprint(payload) {
-                trace!(
-                    "Extracted TLS fingerprint for {}: {}",
-                    event.flow_key,
-                    fingerprint.fingerprint
-                );
+                if !is_tls_port(event.flow_key.dst_port) {
+                    tracing::debug!(
+                        "TLS fingerprint on non-standard port {}: {}",
+                        event.flow_key.dst_port,
+                        fingerprint.fingerprint
+                    );
+                } else {
+                    trace!(
+                        "Extracted TLS fingerprint for {}: {}",
+                        event.flow_key,
+                        fingerprint.fingerprint
+                    );
+                }
                 return (Some(fingerprint), TlsStatus::Fingerprinted);
             }
         }
 
-        // TLS port but no fingerprint (could be resumed session or encrypted)
-        (None, TlsStatus::TlsNoFingerprint)
+        // For standard TLS ports without fingerprint, mark as TLS but no FP
+        if is_tls_port(event.flow_key.dst_port) {
+            return (None, TlsStatus::TlsNoFingerprint);
+        }
+
+        // Non-TLS port with no TLS payload - plaintext
+        (None, TlsStatus::Plaintext)
     }
 
     /// Adds a new event to this flow's data.
@@ -334,7 +343,8 @@ impl FlowData {
         self.last_seen = event.timestamp;
 
         // Try to extract TLS fingerprint if we don't have one yet
-        if self.tls_fingerprint.is_none() && self.tls_status != TlsStatus::Plaintext {
+        // Try for all TCP traffic (including non-standard ports for protocol mismatch detection)
+        if self.tls_fingerprint.is_none() && event.flow_key.protocol == Protocol::Tcp {
             let (fp, status) = Self::extract_tls_info(event);
             if fp.is_some() {
                 self.tls_fingerprint = fp;
@@ -525,25 +535,54 @@ impl FlowAnalyzer {
                 }
 
                 // DNS tunneling indicators
-                let dns_suspicious = dns_analysis.as_ref().map(|d| d.is_suspicious).unwrap_or(false);
+                let dns_suspicious = dns_analysis
+                    .as_ref()
+                    .map(|d| d.is_suspicious)
+                    .unwrap_or(false);
                 if dns_suspicious {
                     indicators.push("dns_tunneling".to_string());
                     if let Some(ref dns) = dns_analysis {
                         for indicator in &dns.indicators {
                             let indicator_str = match indicator {
-                                crate::dns_detector::DnsIndicator::HighEntropy { .. } => "high_entropy_dns",
-                                crate::dns_detector::DnsIndicator::LongLabel { .. } => "long_dns_label",
-                                crate::dns_detector::DnsIndicator::HighQueryRate => "high_dns_query_rate",
-                                crate::dns_detector::DnsIndicator::SuspiciousRecordType { .. } => "suspicious_dns_qtype",
-                                crate::dns_detector::DnsIndicator::ManySubdomains { .. } => "many_unique_subdomains",
+                                crate::dns_detector::DnsIndicator::HighEntropy { .. } => {
+                                    "high_entropy_dns"
+                                }
+                                crate::dns_detector::DnsIndicator::LongLabel { .. } => {
+                                    "long_dns_label"
+                                }
+                                crate::dns_detector::DnsIndicator::HighQueryRate => {
+                                    "high_dns_query_rate"
+                                }
+                                crate::dns_detector::DnsIndicator::SuspiciousRecordType {
+                                    ..
+                                } => "suspicious_dns_qtype",
+                                crate::dns_detector::DnsIndicator::ManySubdomains { .. } => {
+                                    "many_unique_subdomains"
+                                }
                             };
                             indicators.push(indicator_str.to_string());
                         }
                     }
                 }
 
-                // Report suspicious flows (periodic OR DNS tunneling)
-                if is_periodic || dns_suspicious {
+                // Protocol mismatch detection
+                let mut protocol_mismatch = false;
+
+                // TLS on non-standard port (fingerprinted TLS but not on typical TLS ports)
+                if flow_data.tls_fingerprint.is_some() && !is_tls_port(flow_data.flow_key.dst_port)
+                {
+                    indicators.push("tls_on_nonstandard_port".to_string());
+                    protocol_mismatch = true;
+                }
+
+                // DNS on non-standard port (we have DNS tracker but port is not 53/5353/5355)
+                if flow_data.dns_tracker.is_some() && !is_dns_port(flow_data.flow_key.dst_port) {
+                    indicators.push("dns_on_nonstandard_port".to_string());
+                    protocol_mismatch = true;
+                }
+
+                // Report suspicious flows (periodic OR DNS tunneling OR protocol mismatch)
+                if is_periodic || dns_suspicious || protocol_mismatch {
                     suspicious_flows.push(FlowAnalysis {
                         flow_key: flow_data.flow_key.clone(),
                         classification: result.classification,
@@ -604,6 +643,7 @@ impl FlowAnalyzer {
     }
 
     /// Returns current statistics.
+    #[allow(dead_code)] // Available for monitoring/debugging
     pub fn stats(&self) -> AnalyzerStats {
         AnalyzerStats {
             total_flows: self.flows.len(),
@@ -614,6 +654,7 @@ impl FlowAnalyzer {
 }
 
 /// Runtime statistics for the analyzer.
+#[allow(dead_code)] // Available for monitoring/debugging
 #[derive(Debug, Clone)]
 pub struct AnalyzerStats {
     pub total_flows: usize,
@@ -631,7 +672,10 @@ pub async fn run_analyzer(
     let mut analyzer = FlowAnalyzer::new(config);
     let mut interval = interval(analysis_interval);
 
-    info!("Analyzer started, analysis interval: {:?}", analysis_interval);
+    info!(
+        "Analyzer started, analysis interval: {:?}",
+        analysis_interval
+    );
 
     loop {
         tokio::select! {
@@ -706,7 +750,10 @@ mod tests {
         let intervals = vec![500.0, 3000.0, 100.0, 5000.0, 200.0, 8000.0, 50.0];
         let stats = calculate_statistics(&intervals);
 
-        assert!(stats.cv >= 1.0, "CV should be >= 1.0 for stochastic traffic");
+        assert!(
+            stats.cv >= 1.0,
+            "CV should be >= 1.0 for stochastic traffic"
+        );
         assert_eq!(
             FlowClassification::from_cv(stats.cv),
             FlowClassification::Stochastic
@@ -812,5 +859,67 @@ mod tests {
             "A 60-second beacon with 5% jitter should be detected as periodic: CV={}",
             stats.cv
         );
+    }
+
+    #[test]
+    fn test_statistics_empty_input() {
+        let stats = calculate_statistics(&[]);
+
+        assert_eq!(stats.mean, 0.0);
+        assert_eq!(stats.std_dev, 0.0);
+        assert!(
+            stats.cv.is_infinite(),
+            "CV should be infinite for empty input"
+        );
+    }
+
+    #[test]
+    fn test_statistics_single_element() {
+        let stats = calculate_statistics(&[1000.0]);
+
+        assert_eq!(stats.mean, 1000.0);
+        // Single element has no meaningful CV (infinite)
+        assert!(stats.cv.is_infinite() || stats.cv == 0.0);
+    }
+
+    #[test]
+    fn test_statistics_all_zeros() {
+        let stats = calculate_statistics(&[0.0, 0.0, 0.0, 0.0]);
+
+        assert_eq!(stats.mean, 0.0);
+        assert!(
+            stats.cv.is_infinite(),
+            "CV should be infinite when mean is zero"
+        );
+    }
+
+    #[test]
+    fn test_cv_detector_empty_input() {
+        let detector = CvDetector::new(5);
+        let result = detector.analyze(&[]);
+
+        assert_eq!(result.classification, FlowClassification::Insufficient);
+        assert!(result.cv.is_none());
+    }
+
+    #[test]
+    fn test_cv_classification_moderate() {
+        // Moderate variation - CV in 0.5-1.0 range
+        let intervals = vec![100.0, 200.0, 100.0, 200.0, 100.0, 200.0];
+        let stats = calculate_statistics(&intervals);
+
+        let classification = FlowClassification::from_cv(stats.cv);
+        assert!(
+            classification == FlowClassification::Moderate
+                || classification == FlowClassification::JitteredPeriodic,
+            "Should be moderate or jittered for alternating intervals: CV={}",
+            stats.cv
+        );
+    }
+
+    #[test]
+    fn test_flow_classification_display() {
+        assert!(format!("{}", FlowClassification::HighlyPeriodic).contains("Periodic"));
+        assert!(format!("{}", FlowClassification::Stochastic).contains("Organic"));
     }
 }
