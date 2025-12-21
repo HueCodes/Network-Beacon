@@ -25,6 +25,7 @@ pub enum CaptureError {
     #[error("Failed to read packet: {0}")]
     PacketRead(#[from] pcap::Error),
 
+    #[allow(dead_code)] // For future async channel handling
     #[error("Channel closed unexpectedly")]
     ChannelClosed,
 
@@ -33,6 +34,7 @@ pub enum CaptureError {
 }
 
 /// Errors that can occur during flow analysis.
+#[allow(dead_code)] // Defined for future typed error handling
 #[derive(Error, Debug)]
 pub enum AnalyzerError {
     #[error("Insufficient data points for analysis (need at least {required}, got {actual})")]
@@ -46,6 +48,7 @@ pub enum AnalyzerError {
 }
 
 /// Errors that can occur in the TUI layer.
+#[allow(dead_code)] // Defined for future typed error handling
 #[derive(Error, Debug)]
 pub enum UiError {
     #[error("Terminal initialization failed: {0}")]
