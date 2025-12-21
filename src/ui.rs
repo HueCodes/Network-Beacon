@@ -220,7 +220,10 @@ fn render_header(frame: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  |  "),
-        Span::styled("C2 Beacon Detection System", Style::default().fg(Color::Gray)),
+        Span::styled(
+            "C2 Beacon Detection System",
+            Style::default().fg(Color::Gray),
+        ),
     ];
 
     let header = Paragraph::new(Line::from(title))
@@ -306,9 +309,16 @@ fn render_stats(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_flows_table(frame: &mut Frame, area: Rect, app: &mut App) {
-    let header_cells = ["Severity", "Source IP", "Dest IP:Port", "CV", "Interval", "TLS Fingerprint"]
-        .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).bold()));
+    let header_cells = [
+        "Severity",
+        "Source IP",
+        "Dest IP:Port",
+        "CV",
+        "Interval",
+        "Indicators",
+    ]
+    .iter()
+    .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).bold()));
 
     let header = Row::new(header_cells)
         .style(Style::default())
@@ -343,16 +353,19 @@ fn render_flows_table(frame: &mut Frame, area: Rect, app: &mut App) {
                     })
                     .unwrap_or_else(|| "N/A".to_string());
 
-                // TLS fingerprint display with color coding
-                let (tls_display, tls_style) = format_tls_fingerprint(flow);
+                // Format indicators with color coding
+                let (indicators_display, indicators_style) = format_indicators(flow);
 
                 Row::new(vec![
                     Cell::from(flow.classification.severity()).style(severity_style),
                     Cell::from(flow.flow_key.src_ip.to_string()),
-                    Cell::from(format!("{}:{}", flow.flow_key.dst_ip, flow.flow_key.dst_port)),
+                    Cell::from(format!(
+                        "{}:{}",
+                        flow.flow_key.dst_ip, flow.flow_key.dst_port
+                    )),
                     Cell::from(cv_str),
                     Cell::from(interval_str),
-                    Cell::from(tls_display).style(tls_style),
+                    Cell::from(indicators_display).style(indicators_style),
                 ])
             })
             .collect(),
@@ -367,7 +380,7 @@ fn render_flows_table(frame: &mut Frame, area: Rect, app: &mut App) {
             Constraint::Length(22),
             Constraint::Length(8),
             Constraint::Length(10),
-            Constraint::Length(28),
+            Constraint::Length(30),
         ],
     )
     .header(header)
@@ -431,19 +444,80 @@ fn format_tls_fingerprint(flow: &FlowAnalysis) -> (String, Style) {
 
                 (display, style)
             } else {
-                ("TLS (No FP)".to_string(), Style::default().fg(Color::DarkGray))
+                (
+                    "TLS (No FP)".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                )
             }
         }
-        TlsStatus::TlsNoFingerprint => {
-            ("TLS (Resumed)".to_string(), Style::default().fg(Color::DarkGray))
-        }
-        TlsStatus::Plaintext => {
-            ("Plaintext".to_string(), Style::default().fg(Color::Gray))
-        }
-        TlsStatus::Unknown => {
-            ("N/A".to_string(), Style::default().fg(Color::DarkGray))
-        }
+        TlsStatus::TlsNoFingerprint => (
+            "TLS (Resumed)".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
+        TlsStatus::Plaintext => ("Plaintext".to_string(), Style::default().fg(Color::Gray)),
+        TlsStatus::Unknown => ("N/A".to_string(), Style::default().fg(Color::DarkGray)),
     }
+}
+
+/// Formats detection indicators for display with appropriate color coding.
+/// Returns (display_string, style).
+fn format_indicators(flow: &FlowAnalysis) -> (String, Style) {
+    if flow.indicators.is_empty() {
+        return ("None".to_string(), Style::default().fg(Color::Gray));
+    }
+
+    // Determine the most severe indicator for color
+    let has_dns_tunneling = flow.indicators.iter().any(|i| i == "dns_tunneling");
+    let has_protocol_mismatch = flow
+        .indicators
+        .iter()
+        .any(|i| i.contains("nonstandard_port"));
+    let has_periodic = flow.indicators.iter().any(|i| i == "periodic_beacon");
+    let has_unknown_tls = flow.indicators.iter().any(|i| i == "unknown_tls_client");
+
+    // Choose color based on severity
+    let style = if has_dns_tunneling || has_protocol_mismatch {
+        Style::default().fg(Color::Red).bold()
+    } else if has_periodic && has_unknown_tls {
+        Style::default().fg(Color::Red)
+    } else if has_periodic {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    // Create abbreviated display string (max ~28 chars)
+    let mut parts = Vec::new();
+    if has_dns_tunneling {
+        parts.push("DNS-TUN");
+    }
+    if has_protocol_mismatch {
+        parts.push("PROTO-MIS");
+    }
+    if has_periodic {
+        parts.push("BEACON");
+    }
+    if has_unknown_tls {
+        parts.push("UNK-TLS");
+    }
+
+    let display = if parts.is_empty() {
+        // Show first indicator if no known categories
+        flow.indicators
+            .first()
+            .map(|s| {
+                if s.len() > 28 {
+                    format!("{}...", &s[..25])
+                } else {
+                    s.clone()
+                }
+            })
+            .unwrap_or_else(|| "Unknown".to_string())
+    } else {
+        parts.join(", ")
+    };
+
+    (display, style)
 }
 
 fn render_footer(frame: &mut Frame, area: Rect) {
@@ -625,6 +699,64 @@ fn render_detail_overlay(frame: &mut Frame, flow: &FlowAnalysis) {
     // Add additional TLS info if available
     detail_text.extend(tls_info);
 
+    // Add DNS analysis if available
+    if let Some(ref dns) = flow.dns_analysis {
+        detail_text.push(Line::from(""));
+        detail_text.push(Line::from(Span::styled(
+            "DNS Tunneling Analysis",
+            Style::default().bold().fg(Color::Cyan),
+        )));
+
+        let dns_status_style = if dns.is_suspicious {
+            Style::default().fg(Color::Red).bold()
+        } else {
+            Style::default().fg(Color::Green)
+        };
+
+        detail_text.push(Line::from(vec![
+            Span::styled("Status:         ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                if dns.is_suspicious {
+                    "SUSPICIOUS"
+                } else {
+                    "Normal"
+                },
+                dns_status_style,
+            ),
+        ]));
+        detail_text.push(Line::from(vec![
+            Span::styled("Max Entropy:    ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{:.2} bits/char", dns.max_entropy)),
+        ]));
+        detail_text.push(Line::from(vec![
+            Span::styled("Max Label Len:  ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{} chars", dns.max_label_length)),
+        ]));
+        detail_text.push(Line::from(vec![
+            Span::styled("Query Rate:     ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{:.2} q/s", dns.query_rate)),
+        ]));
+        detail_text.push(Line::from(vec![
+            Span::styled("Query Count:    ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{}", dns.query_count)),
+        ]));
+    }
+
+    // Add indicators section
+    if !flow.indicators.is_empty() {
+        detail_text.push(Line::from(""));
+        detail_text.push(Line::from(Span::styled(
+            "Detection Indicators",
+            Style::default().bold().fg(Color::Cyan),
+        )));
+        for indicator in &flow.indicators {
+            detail_text.push(Line::from(vec![
+                Span::styled("  - ", Style::default().fg(Color::Yellow)),
+                Span::raw(indicator.clone()),
+            ]));
+        }
+    }
+
     detail_text.push(Line::from(""));
     detail_text.push(Line::from(Span::styled(
         "Press Enter or Esc to close",
@@ -678,7 +810,10 @@ fn build_tls_detail_lines(flow: &FlowAnalysis) -> Vec<Line<'static>> {
             let desc = fp.known_match.as_deref().unwrap_or("Known Client");
             (format!("Yes ({})", desc), Style::default().fg(Color::Green))
         } else {
-            ("No - Unknown Client".to_string(), Style::default().fg(Color::Yellow))
+            (
+                "No - Unknown Client".to_string(),
+                Style::default().fg(Color::Yellow),
+            )
         };
 
         lines.push(Line::from(vec![
