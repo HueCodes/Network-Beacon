@@ -154,11 +154,7 @@ impl From<&DnsAnalysisResult> for JsonDnsAnalysis {
             max_label_length: dns.max_label_length,
             query_rate: dns.query_rate,
             query_count: dns.query_count,
-            indicators: dns
-                .indicators
-                .iter()
-                .map(|i| format!("{:?}", i))
-                .collect(),
+            indicators: dns.indicators.iter().map(|i| format!("{:?}", i)).collect(),
         }
     }
 }
@@ -175,7 +171,8 @@ pub fn export_report(report: &AnalysisReport, format: OutputFormat) -> String {
 /// Exports report as pretty-printed JSON
 pub fn export_json(report: &AnalysisReport) -> String {
     let json_report = JsonReport::from(report);
-    serde_json::to_string_pretty(&json_report).unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
+    serde_json::to_string_pretty(&json_report)
+        .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
 }
 
 /// Exports report as JSON Lines (one flow per line)
@@ -254,12 +251,14 @@ fn format_interval(ms: Option<f64>) -> String {
 }
 
 /// Exports a single flow as JSON (for streaming output)
+#[allow(dead_code)] // Available for streaming JSON output
 pub fn export_flow_json(flow: &FlowAnalysis) -> String {
     let json_flow = JsonFlow::from(flow);
     serde_json::to_string(&json_flow).unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
 }
 
 /// Creates a detection event for SIEM integration
+#[allow(dead_code)] // Available for SIEM integration
 #[derive(Serialize)]
 pub struct DetectionEvent {
     pub event_type: &'static str,
@@ -276,6 +275,7 @@ pub struct DetectionEvent {
 }
 
 impl DetectionEvent {
+    #[allow(dead_code)] // Available for SIEM integration
     pub fn from_flow(flow: &FlowAnalysis, timestamp: DateTime<Utc>) -> Self {
         // Calculate confidence based on indicators
         let base_confidence = match flow.classification {
@@ -285,13 +285,23 @@ impl DetectionEvent {
             _ => 0.3,
         };
 
-        let dns_boost = if flow.dns_analysis.as_ref().map(|d| d.is_suspicious).unwrap_or(false) {
+        let dns_boost = if flow
+            .dns_analysis
+            .as_ref()
+            .map(|d| d.is_suspicious)
+            .unwrap_or(false)
+        {
             0.1
         } else {
             0.0
         };
 
-        let tls_boost = if flow.tls_fingerprint.as_ref().map(|t| !t.is_known_good).unwrap_or(false) {
+        let tls_boost = if flow
+            .tls_fingerprint
+            .as_ref()
+            .map(|t| !t.is_known_good)
+            .unwrap_or(false)
+        {
             0.05
         } else {
             0.0
@@ -299,7 +309,12 @@ impl DetectionEvent {
 
         let confidence = f64::min(base_confidence + dns_boost + tls_boost, 1.0);
 
-        let detection_type = if flow.dns_analysis.as_ref().map(|d| d.is_suspicious).unwrap_or(false) {
+        let detection_type = if flow
+            .dns_analysis
+            .as_ref()
+            .map(|d| d.is_suspicious)
+            .unwrap_or(false)
+        {
             "dns_tunneling"
         } else {
             "periodic_beacon"
@@ -326,6 +341,7 @@ impl DetectionEvent {
         }
     }
 
+    #[allow(dead_code)] // Available for SIEM integration
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
     }
