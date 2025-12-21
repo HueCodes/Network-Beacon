@@ -60,6 +60,7 @@ impl std::fmt::Display for FlowKey {
 pub enum Protocol {
     Tcp,
     Udp,
+    #[allow(dead_code)] // For future protocol support
     Other(u8),
 }
 
@@ -189,10 +190,11 @@ impl PacketCapture {
 
         // Apply BPF filter if specified
         if let Some(ref filter) = config.filter {
-            cap.filter(filter, true).map_err(|e| CaptureError::FilterSet {
-                filter: filter.clone(),
-                source: e,
-            })?;
+            cap.filter(filter, true)
+                .map_err(|e| CaptureError::FilterSet {
+                    filter: filter.clone(),
+                    source: e,
+                })?;
             info!("Applied capture filter: {}", filter);
         }
 
@@ -247,7 +249,12 @@ impl PacketCapture {
         };
 
         // Extract transport layer info and payload
-        let (dst_port, protocol, tcp_payload, udp_payload): (u16, Protocol, Option<&[u8]>, Option<&[u8]>) = match &sliced.transport {
+        let (dst_port, protocol, tcp_payload, udp_payload): (
+            u16,
+            Protocol,
+            Option<&[u8]>,
+            Option<&[u8]>,
+        ) = match &sliced.transport {
             Some(TransportSlice::Tcp(tcp)) => {
                 let port = tcp.destination_port();
                 // Get the payload after TCP header
@@ -263,7 +270,12 @@ impl PacketCapture {
                 let payload_offset = eth_len + ip_len + tcp_header_len;
 
                 if payload_offset < full_slice.len() {
-                    (port, Protocol::Tcp, Some(&full_slice[payload_offset..]), None)
+                    (
+                        port,
+                        Protocol::Tcp,
+                        Some(&full_slice[payload_offset..]),
+                        None,
+                    )
                 } else {
                     (port, Protocol::Tcp, None, None)
                 }
@@ -291,15 +303,24 @@ impl PacketCapture {
             _ => return None,
         };
 
-        // Extract TLS payload for fingerprinting (only on TLS ports, TCP only)
+        // Extract TLS payload for fingerprinting (TCP only)
+        // We check ALL TCP ports to detect TLS on non-standard ports (protocol mismatch)
         // Limit to 512 bytes - enough for Client Hello, not excessive
-        let tls_payload: Option<Vec<u8>> = if protocol == Protocol::Tcp && is_tls_port(dst_port) {
+        let tls_payload: Option<Vec<u8>> = if protocol == Protocol::Tcp {
             tcp_payload.and_then(|p: &[u8]| {
                 if !p.is_empty() {
                     // Check if this looks like a TLS handshake (Content Type 0x16)
                     if p[0] == 0x16 {
                         let len = p.len().min(512);
-                        trace!("Captured TLS payload: {} bytes on port {}", len, dst_port);
+                        if !is_tls_port(dst_port) {
+                            trace!(
+                                "Captured TLS on non-standard port {}: {} bytes",
+                                dst_port,
+                                len
+                            );
+                        } else {
+                            trace!("Captured TLS payload: {} bytes on port {}", len, dst_port);
+                        }
                         Some(p[..len].to_vec())
                     } else {
                         None
@@ -338,7 +359,10 @@ impl PacketCapture {
 
         debug!(
             "Captured: {} -> {}:{} ({}) tls_payload={}",
-            src_ip, dst_ip, dst_port, protocol,
+            src_ip,
+            dst_ip,
+            dst_port,
+            protocol,
             tls_payload.as_ref().map(|p| p.len()).unwrap_or(0)
         );
 
