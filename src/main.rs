@@ -170,7 +170,15 @@ enum Commands {
     },
 
     /// Generate a default configuration file.
-    GenerateConfig,
+    GenerateConfig {
+        /// Output file path (default: network-beacon.toml).
+        #[arg(short, long, default_value = "network-beacon.toml")]
+        output: PathBuf,
+
+        /// Print to stdout instead of writing to file.
+        #[arg(long)]
+        stdout: bool,
+    },
 }
 
 #[tokio::main]
@@ -193,6 +201,9 @@ async fn main() -> Result<()> {
         } => {
             // Load config file if provided
             let file_config = Config::load_or_default(config.as_deref());
+
+            // Validate configuration
+            file_config.validate().context("Invalid configuration")?;
 
             // Initialize logging
             let log_level = if verbose { Level::DEBUG } else { Level::INFO };
@@ -242,14 +253,7 @@ async fn main() -> Result<()> {
             tracing::subscriber::set_global_default(subscriber)
                 .context("Failed to set tracing subscriber")?;
 
-            run_replay(
-                &file,
-                speed,
-                max_events,
-                min_samples,
-                output.into(),
-            )
-            .await
+            run_replay(&file, speed, max_events, min_samples, output.into()).await
         }
 
         Commands::ListInterfaces => {
@@ -274,17 +278,23 @@ async fn main() -> Result<()> {
             file,
             min_samples,
             output,
-        } => {
-            run_offline_analysis(&file, min_samples, output.into()).await
-        }
+        } => run_offline_analysis(&file, min_samples, output.into()).await,
 
-        Commands::GenerateConfig => {
-            println!("{}", Config::generate_default());
+        Commands::GenerateConfig { output, stdout } => {
+            let config_content = Config::generate_default();
+            if stdout {
+                println!("{}", config_content);
+            } else {
+                std::fs::write(&output, &config_content)
+                    .with_context(|| format!("Failed to write config to {}", output.display()))?;
+                println!("Configuration written to: {}", output.display());
+            }
             Ok(())
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_capture(
     interface: Option<String>,
     filter: Option<String>,
@@ -322,9 +332,7 @@ async fn run_capture(
     // Start packet capture (producer)
     let capture = PacketCapture::new(capture_config);
     let shutdown_handle = capture.shutdown_handle();
-    let event_rx = capture
-        .start()
-        .context("Failed to start packet capture")?;
+    let event_rx = capture.start().context("Failed to start packet capture")?;
 
     info!("Packet capture started");
 
@@ -484,8 +492,12 @@ async fn run_offline_analysis(
             };
 
             let (dst_port, protocol) = match sliced.transport {
-                Some(etherparse::TransportSlice::Tcp(tcp)) => (tcp.destination_port(), Protocol::Tcp),
-                Some(etherparse::TransportSlice::Udp(udp)) => (udp.destination_port(), Protocol::Udp),
+                Some(etherparse::TransportSlice::Tcp(tcp)) => {
+                    (tcp.destination_port(), Protocol::Tcp)
+                }
+                Some(etherparse::TransportSlice::Udp(udp)) => {
+                    (udp.destination_port(), Protocol::Udp)
+                }
                 _ => continue,
             };
 
