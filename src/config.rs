@@ -11,24 +11,13 @@ use serde::{Deserialize, Serialize};
 use crate::export::OutputFormat;
 
 /// Main configuration structure
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     pub capture: CaptureConfig,
     pub analyzer: AnalyzerConfig,
     pub detection: DetectionConfig,
     pub output: OutputConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            capture: CaptureConfig::default(),
-            analyzer: AnalyzerConfig::default(),
-            detection: DetectionConfig::default(),
-            output: OutputConfig::default(),
-        }
-    }
 }
 
 impl Config {
@@ -57,7 +46,8 @@ impl Config {
     /// Generates a default configuration file content
     pub fn generate_default() -> String {
         let config = Config::default();
-        toml::to_string_pretty(&config).unwrap_or_else(|_| "# Failed to generate config".to_string())
+        toml::to_string_pretty(&config)
+            .unwrap_or_else(|_| "# Failed to generate config".to_string())
     }
 
     /// Validates the configuration
@@ -68,7 +58,9 @@ impl Config {
         if self.analyzer.min_samples == 0 {
             anyhow::bail!("min_samples must be greater than 0");
         }
-        if self.detection.cv_threshold_periodic <= 0.0 || self.detection.cv_threshold_periodic >= 1.0 {
+        if self.detection.cv_threshold_periodic <= 0.0
+            || self.detection.cv_threshold_periodic >= 1.0
+        {
             anyhow::bail!("cv_threshold_periodic must be between 0.0 and 1.0");
         }
         if self.detection.entropy_threshold <= 0.0 || self.detection.entropy_threshold >= 8.0 {
@@ -183,15 +175,17 @@ pub enum DetectionProfile {
 
 impl DetectionProfile {
     /// Returns adjusted thresholds based on profile
+    #[allow(dead_code)] // For future config-based threshold adjustment
     pub fn adjust_cv_threshold(&self, base: f64) -> f64 {
         match self {
-            Self::Paranoid => base * 1.5,  // More lenient = more detections
+            Self::Paranoid => base * 1.5, // More lenient = more detections
             Self::Balanced => base,
-            Self::Relaxed => base * 0.5,   // Stricter = fewer detections
+            Self::Relaxed => base * 0.5, // Stricter = fewer detections
         }
     }
 
     /// Returns adjusted min_samples based on profile
+    #[allow(dead_code)] // For future config-based threshold adjustment
     pub fn adjust_min_samples(&self, base: usize) -> usize {
         match self {
             Self::Paranoid => base.saturating_sub(2).max(2),
