@@ -16,7 +16,7 @@ use tracing::{debug, info, trace};
 
 use crate::capture::{FlowEvent, FlowKey, Protocol};
 use crate::dns_detector::is_dns_port;
-use crate::tls_fingerprint::is_tls_port;
+// Note: is_tls_port removed since we now extract TLS from all TCP ports
 
 /// Configuration for PCAP replay
 #[derive(Debug, Clone)]
@@ -71,6 +71,7 @@ impl PcapReplay {
     }
 
     /// Replays the PCAP file synchronously, sending events to the provided sender.
+    #[allow(dead_code)] // Alternative API for custom replay handling
     pub async fn replay_to_sender(self, tx: mpsc::Sender<FlowEvent>) -> Result<ReplayStats> {
         replay_file(&self.file_path, tx, self.config).await
     }
@@ -198,49 +199,53 @@ fn parse_pcap_packet(data: &[u8], timestamp: DateTime<Utc>) -> Option<FlowEvent>
     };
 
     // Extract transport layer info and payloads
-    let (dst_port, protocol, tcp_payload, udp_payload): (u16, Protocol, Option<&[u8]>, Option<&[u8]>) =
-        match &sliced.transport {
-            Some(TransportSlice::Tcp(tcp)) => {
-                let port = tcp.destination_port();
-                let eth_len = 14;
-                let ip_len = match &sliced.net {
-                    Some(NetSlice::Ipv4(ipv4)) => (ipv4.header().ihl() as usize) * 4,
-                    Some(NetSlice::Ipv6(_)) => 40,
-                    _ => 0,
-                };
-                let tcp_header_len = tcp.data_offset() as usize * 4;
-                let payload_offset = eth_len + ip_len + tcp_header_len;
+    let (dst_port, protocol, tcp_payload, udp_payload): (
+        u16,
+        Protocol,
+        Option<&[u8]>,
+        Option<&[u8]>,
+    ) = match &sliced.transport {
+        Some(TransportSlice::Tcp(tcp)) => {
+            let port = tcp.destination_port();
+            let eth_len = 14;
+            let ip_len = match &sliced.net {
+                Some(NetSlice::Ipv4(ipv4)) => (ipv4.header().ihl() as usize) * 4,
+                Some(NetSlice::Ipv6(_)) => 40,
+                _ => 0,
+            };
+            let tcp_header_len = tcp.data_offset() as usize * 4;
+            let payload_offset = eth_len + ip_len + tcp_header_len;
 
-                if payload_offset < data.len() {
-                    (port, Protocol::Tcp, Some(&data[payload_offset..]), None)
-                } else {
-                    (port, Protocol::Tcp, None, None)
-                }
+            if payload_offset < data.len() {
+                (port, Protocol::Tcp, Some(&data[payload_offset..]), None)
+            } else {
+                (port, Protocol::Tcp, None, None)
             }
-            Some(TransportSlice::Udp(udp)) => {
-                let port = udp.destination_port();
-                let eth_len = 14;
-                let ip_len = match &sliced.net {
-                    Some(NetSlice::Ipv4(ipv4)) => (ipv4.header().ihl() as usize) * 4,
-                    Some(NetSlice::Ipv6(_)) => 40,
-                    _ => 0,
-                };
-                let udp_header_len = 8;
-                let payload_offset = eth_len + ip_len + udp_header_len;
+        }
+        Some(TransportSlice::Udp(udp)) => {
+            let port = udp.destination_port();
+            let eth_len = 14;
+            let ip_len = match &sliced.net {
+                Some(NetSlice::Ipv4(ipv4)) => (ipv4.header().ihl() as usize) * 4,
+                Some(NetSlice::Ipv6(_)) => 40,
+                _ => 0,
+            };
+            let udp_header_len = 8;
+            let payload_offset = eth_len + ip_len + udp_header_len;
 
-                let payload = if payload_offset < data.len() {
-                    Some(&data[payload_offset..])
-                } else {
-                    None
-                };
+            let payload = if payload_offset < data.len() {
+                Some(&data[payload_offset..])
+            } else {
+                None
+            };
 
-                (port, Protocol::Udp, None, payload)
-            }
-            _ => return None,
-        };
+            (port, Protocol::Udp, None, payload)
+        }
+        _ => return None,
+    };
 
-    // Extract TLS payload
-    let tls_payload: Option<Vec<u8>> = if protocol == Protocol::Tcp && is_tls_port(dst_port) {
+    // Extract TLS payload (check all TCP ports for protocol mismatch detection)
+    let tls_payload: Option<Vec<u8>> = if protocol == Protocol::Tcp {
         tcp_payload.and_then(|p| {
             if !p.is_empty() && p[0] == 0x16 {
                 let len = p.len().min(512);
