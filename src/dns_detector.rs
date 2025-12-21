@@ -14,8 +14,8 @@
 //! - Labels > 50 chars suggest data encoding
 //! - Rapid queries to same domain indicate command/control channel
 
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use tracing::{debug, trace};
 
 /// DNS tunneling detection thresholds
@@ -60,6 +60,7 @@ pub struct DnsAnalysisResult {
 }
 
 impl DnsAnalysisResult {
+    #[allow(dead_code)] // Factory for non-suspicious results
     pub fn not_suspicious() -> Self {
         Self {
             is_suspicious: false,
@@ -91,23 +92,26 @@ pub enum DnsIndicator {
 #[derive(Debug, Clone)]
 pub struct DnsQuery {
     /// Full query name (e.g., "encoded-data.evil.com")
+    #[allow(dead_code)] // Available for detailed logging
     pub qname: String,
     /// Individual labels (e.g., ["encoded-data", "evil", "com"])
     pub labels: Vec<String>,
     /// Query type (A=1, TXT=16, NULL=10, etc.)
     pub qtype: u16,
     /// Query class (usually IN=1)
+    #[allow(dead_code)] // Available for detailed logging
     pub qclass: u16,
 }
 
 /// DNS query types that are commonly used for tunneling
 pub fn is_suspicious_qtype(qtype: u16) -> bool {
-    matches!(qtype,
+    matches!(
+        qtype,
         16 |    // TXT - most common for tunneling
         10 |    // NULL - can carry arbitrary data
         99 |    // SPF (deprecated, but abused)
         255 |   // ANY - information gathering
-        28      // AAAA - sometimes abused for data
+        28 // AAAA - sometimes abused for data
     )
 }
 
@@ -261,7 +265,9 @@ impl DnsDetector {
         let unique_count = tracker.unique_subdomains.len();
         if unique_count > 10 {
             is_suspicious = true;
-            indicators.push(DnsIndicator::ManySubdomains { count: unique_count });
+            indicators.push(DnsIndicator::ManySubdomains {
+                count: unique_count,
+            });
             debug!("Many unique subdomains: {}", unique_count);
         }
 
@@ -444,24 +450,40 @@ mod tests {
     fn test_entropy_random_looking() {
         // Base64-like string should have higher entropy
         let entropy = calculate_entropy("aGVsbG8gd29ybGQ=");
-        assert!(entropy > 3.0, "Base64 entropy should be > 3.0, got {}", entropy);
+        assert!(
+            entropy > 3.0,
+            "Base64 entropy should be > 3.0, got {}",
+            entropy
+        );
     }
 
     #[test]
     fn test_entropy_normal_domain() {
         // Normal domain names have moderate entropy
         let entropy = calculate_entropy("www");
-        assert!(entropy < 2.0, "Simple domain entropy should be < 2.0, got {}", entropy);
+        assert!(
+            entropy < 2.0,
+            "Simple domain entropy should be < 2.0, got {}",
+            entropy
+        );
 
         let entropy2 = calculate_entropy("google");
-        assert!(entropy2 < 3.0, "Normal domain entropy should be < 3.0, got {}", entropy2);
+        assert!(
+            entropy2 < 3.0,
+            "Normal domain entropy should be < 3.0, got {}",
+            entropy2
+        );
     }
 
     #[test]
     fn test_entropy_hex_data() {
         // Hex-encoded data
         let entropy = calculate_entropy("48656c6c6f576f726c64");
-        assert!(entropy > 2.5, "Hex data entropy should be > 2.5, got {}", entropy);
+        assert!(
+            entropy > 2.5,
+            "Hex data entropy should be > 2.5, got {}",
+            entropy
+        );
     }
 
     #[test]
@@ -539,8 +561,14 @@ mod tests {
         tracker.add_query(&query, Utc::now());
 
         let result = detector.analyze(&tracker);
-        assert!(result.is_suspicious, "High entropy subdomain should be suspicious");
-        assert!(result.indicators.iter().any(|i| matches!(i, DnsIndicator::HighEntropy { .. })));
+        assert!(
+            result.is_suspicious,
+            "High entropy subdomain should be suspicious"
+        );
+        assert!(result
+            .indicators
+            .iter()
+            .any(|i| matches!(i, DnsIndicator::HighEntropy { .. })));
     }
 
     #[test]
@@ -563,7 +591,10 @@ mod tests {
 
         let result = detector.analyze(&tracker);
         assert!(result.is_suspicious, "Long label should be suspicious");
-        assert!(result.indicators.iter().any(|i| matches!(i, DnsIndicator::LongLabel { .. })));
+        assert!(result
+            .indicators
+            .iter()
+            .any(|i| matches!(i, DnsIndicator::LongLabel { .. })));
     }
 
     #[test]
@@ -577,7 +608,11 @@ mod tests {
         for _ in 0..5 {
             let query = DnsQuery {
                 qname: "normal.example.com".to_string(),
-                labels: vec!["normal".to_string(), "example".to_string(), "com".to_string()],
+                labels: vec![
+                    "normal".to_string(),
+                    "example".to_string(),
+                    "com".to_string(),
+                ],
                 qtype: 16, // TXT
                 qclass: 1,
             };
@@ -585,8 +620,14 @@ mod tests {
         }
 
         let result = detector.analyze(&tracker);
-        assert!(result.is_suspicious, "Multiple TXT queries should be suspicious");
-        assert!(result.indicators.iter().any(|i| matches!(i, DnsIndicator::SuspiciousRecordType { qtype: 16 })));
+        assert!(
+            result.is_suspicious,
+            "Multiple TXT queries should be suspicious"
+        );
+        assert!(result
+            .indicators
+            .iter()
+            .any(|i| matches!(i, DnsIndicator::SuspiciousRecordType { qtype: 16 })));
     }
 
     #[test]
