@@ -16,6 +16,7 @@ etherparse = "0.15"
 libc = "0.2"
 tls-parser = "0.11"
 sha2 = "0.10"
+md5 = "0.7"
 hex = "0.4"
 
 # Async runtime and concurrency
