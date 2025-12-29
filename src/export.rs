@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::analyzer::{AnalysisReport, FlowAnalysis, FlowClassification};
 use crate::dns_detector::DnsAnalysisResult;
+use crate::geo::GeoInfo;
 
 /// Output format for exports
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -88,6 +89,8 @@ pub struct JsonFlow {
     pub tls_fingerprint: Option<JsonTlsInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dns_analysis: Option<JsonDnsAnalysis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geo_info: Option<JsonGeoInfo>,
     pub indicators: Vec<String>,
 }
 
@@ -116,6 +119,7 @@ impl From<&FlowAnalysis> for JsonFlow {
                 known_match: fp.known_match.clone(),
             }),
             dns_analysis: flow.dns_analysis.as_ref().map(JsonDnsAnalysis::from),
+            geo_info: flow.geo_info.as_ref().map(JsonGeoInfo::from),
             indicators: flow.indicators.clone(),
         }
     }
@@ -155,6 +159,32 @@ impl From<&DnsAnalysisResult> for JsonDnsAnalysis {
             query_rate: dns.query_rate,
             query_count: dns.query_count,
             indicators: dns.indicators.iter().map(|i| format!("{:?}", i)).collect(),
+        }
+    }
+}
+
+/// JSON-serializable GeoIP information
+#[derive(Serialize)]
+pub struct JsonGeoInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asn: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asn_org: Option<String>,
+    pub risk: String,
+}
+
+impl From<&GeoInfo> for JsonGeoInfo {
+    fn from(geo: &GeoInfo) -> Self {
+        Self {
+            country_code: geo.country_code.clone(),
+            country_name: geo.country_name.clone(),
+            asn: geo.asn,
+            asn_org: geo.asn_org.clone(),
+            risk: format!("{}", geo.risk),
         }
     }
 }
@@ -224,12 +254,17 @@ pub fn export_text(report: &AnalysisReport) -> String {
         output.push('\n');
 
         for flow in &report.suspicious_flows {
+            let geo_str = flow.geo_info.as_ref()
+                .map(|g| g.country_display())
+                .unwrap_or_else(|| "--".to_string());
+
             output.push_str(&format!(
-                "[{:8}] {} -> {}:{} | CV: {:.4} | Interval: {} | Packets: {} | Indicators: [{}]\n",
+                "[{:8}] {} -> {}:{} ({}) | CV: {:.4} | Interval: {} | Packets: {} | Indicators: [{}]\n",
                 flow.classification.severity(),
                 flow.flow_key.src_ip,
                 flow.flow_key.dst_ip,
                 flow.flow_key.dst_port,
+                geo_str,
                 flow.cv.unwrap_or(0.0),
                 format_interval(flow.mean_interval_ms),
                 flow.packet_count,
