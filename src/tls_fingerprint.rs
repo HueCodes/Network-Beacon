@@ -1,10 +1,19 @@
-//! TLS Fingerprinting module for JA4-style Client Hello analysis.
+//! TLS Fingerprinting module for JA3 and JA4-style Client Hello analysis.
 //!
 //! This module performs deep-packet inspection on TLS handshakes to extract
 //! fingerprints that can identify specific client implementations, including
 //! C2 implants and unauthorized tools.
 //!
-//! # Fingerprint Format (JA4-inspired)
+//! # JA3 Fingerprint Format
+//!
+//! JA3 is the industry-standard TLS fingerprinting format:
+//! `MD5(SSLVersion,Ciphers,Extensions,EllipticCurves,EllipticCurvePointFormats)`
+//!
+//! Example: `e7d705a3286e19ea42f587b344ee6865`
+//!
+//! JA3 provides compatibility with existing threat intelligence feeds and databases.
+//!
+//! # JA4 Fingerprint Format (JA4-inspired)
 //!
 //! The fingerprint is structured as: `{version}_{cipher_hash}_{ext_hash}`
 //! Where:
@@ -14,6 +23,7 @@
 //!
 //! Example: `t13_a0b1c2d3e4f5_f6e5d4c3b2a1`
 
+use md5::{Digest as Md5Digest, Md5};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use tls_parser::{
@@ -21,6 +31,86 @@ use tls_parser::{
     TlsRecordType, TlsVersion,
 };
 use tracing::{debug, trace};
+
+/// Known malicious JA3 fingerprints from threat intelligence.
+/// These are MD5 hashes of JA3 strings associated with known C2 frameworks and malware.
+pub static KNOWN_MALICIOUS_JA3: &[KnownJa3Fingerprint] = &[
+    KnownJa3Fingerprint {
+        ja3_hash: "e7d705a3286e19ea42f587b344ee6865",
+        description: "Cobalt Strike default",
+        category: ThreatCategory::C2Framework,
+    },
+    KnownJa3Fingerprint {
+        ja3_hash: "72a589da586844d7f0818ce684948eea",
+        description: "Metasploit Meterpreter",
+        category: ThreatCategory::C2Framework,
+    },
+    KnownJa3Fingerprint {
+        ja3_hash: "a0e9f5d64349fb13191bc781f81f42e1",
+        description: "Cobalt Strike 4.0+",
+        category: ThreatCategory::C2Framework,
+    },
+    KnownJa3Fingerprint {
+        ja3_hash: "51c64c77e60f3980eea90869b68c58a8",
+        description: "Sliver C2",
+        category: ThreatCategory::C2Framework,
+    },
+    KnownJa3Fingerprint {
+        ja3_hash: "3b5074b1b5d032e5620f69f9f700ff0e",
+        description: "Empire PowerShell",
+        category: ThreatCategory::C2Framework,
+    },
+    KnownJa3Fingerprint {
+        ja3_hash: "d3993683e3cb5d36c6c3f11a13d44c56",
+        description: "Covenant C2",
+        category: ThreatCategory::C2Framework,
+    },
+    KnownJa3Fingerprint {
+        ja3_hash: "6734f37431670b3ab4292b8f60f29984",
+        description: "Trickbot",
+        category: ThreatCategory::Malware,
+    },
+    KnownJa3Fingerprint {
+        ja3_hash: "e35df3e00ca4ef31d42b34bebaa2f86e",
+        description: "AsyncRAT",
+        category: ThreatCategory::Malware,
+    },
+    KnownJa3Fingerprint {
+        ja3_hash: "473cd7cb9faa642487833865d516e578",
+        description: "Emotet",
+        category: ThreatCategory::Malware,
+    },
+];
+
+/// Category of threat for JA3 fingerprints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreatCategory {
+    /// Known C2 framework (Cobalt Strike, Metasploit, etc.)
+    C2Framework,
+    /// Known malware family
+    Malware,
+    /// Suspicious but unconfirmed
+    #[allow(dead_code)]
+    Suspicious,
+}
+
+impl fmt::Display for ThreatCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::C2Framework => write!(f, "C2 Framework"),
+            Self::Malware => write!(f, "Malware"),
+            Self::Suspicious => write!(f, "Suspicious"),
+        }
+    }
+}
+
+/// A known malicious JA3 fingerprint entry.
+#[derive(Debug, Clone)]
+pub struct KnownJa3Fingerprint {
+    pub ja3_hash: &'static str,
+    pub description: &'static str,
+    pub category: ThreatCategory,
+}
 
 /// Known-good TLS fingerprints for common browsers and legitimate software.
 /// These are used to distinguish normal traffic from potentially malicious clients.
@@ -72,6 +162,10 @@ pub struct KnownFingerprint {
 pub struct TlsFingerprint {
     /// Full fingerprint string (JA4-style format).
     pub fingerprint: String,
+    /// JA3 fingerprint hash (MD5, 32 hex chars).
+    pub ja3_hash: String,
+    /// JA3 raw string before hashing (for debugging/analysis).
+    pub ja3_string: String,
     /// Detected TLS version.
     pub tls_version: TlsVersionInfo,
     /// Number of cipher suites offered.
@@ -84,6 +178,12 @@ pub struct TlsFingerprint {
     pub is_known_good: bool,
     /// Description if matches known fingerprint.
     pub known_match: Option<String>,
+    /// Whether this matches a known malicious JA3 fingerprint.
+    pub is_known_malicious: bool,
+    /// Description of matched malicious fingerprint.
+    pub malicious_match: Option<String>,
+    /// Threat category if malicious.
+    pub threat_category: Option<ThreatCategory>,
 }
 
 impl TlsFingerprint {
@@ -156,6 +256,10 @@ struct ClientHelloData {
     extensions: Vec<u16>,
     sni: Option<String>,
     supported_versions: Vec<u16>,
+    /// Elliptic curves (supported groups) for JA3.
+    elliptic_curves: Vec<u16>,
+    /// Elliptic curve point formats for JA3.
+    ec_point_formats: Vec<u8>,
 }
 
 /// Attempts to parse a TLS Client Hello from raw TCP payload.
@@ -212,6 +316,17 @@ pub fn extract_fingerprint(payload: &[u8]) -> Option<TlsFingerprint> {
                             client_hello.supported_versions =
                                 versions.iter().map(|v| v.0).collect();
                         }
+
+                        // Extract elliptic curves (supported groups) for JA3
+                        if let TlsExtension::EllipticCurves(ref curves) = ext {
+                            client_hello.elliptic_curves =
+                                curves.iter().map(|c| c.0).collect();
+                        }
+
+                        // Extract EC point formats for JA3
+                        if let TlsExtension::EcPointFormats(ref formats) = ext {
+                            client_hello.ec_point_formats = formats.to_vec();
+                        }
                     }
                 }
             }
@@ -230,29 +345,46 @@ pub fn extract_fingerprint(payload: &[u8]) -> Option<TlsFingerprint> {
         TlsVersionInfo::from_tls_version(version)
     };
 
-    // Generate fingerprint
+    // Generate JA4-style fingerprint
     let fingerprint = generate_fingerprint(
         &actual_version,
         &client_hello.cipher_suites,
         &client_hello.extensions,
     );
 
-    // Check against known-good list
+    // Generate JA3 fingerprint
+    let (ja3_string, ja3_hash) = generate_ja3(
+        version,
+        &client_hello.cipher_suites,
+        &client_hello.extensions,
+        &client_hello.elliptic_curves,
+        &client_hello.ec_point_formats,
+    );
+
+    // Check against known-good list (JA4)
     let (is_known_good, known_match) = check_known_fingerprint(&fingerprint);
 
+    // Check against known malicious JA3 fingerprints
+    let (is_known_malicious, malicious_match, threat_category) = check_malicious_ja3(&ja3_hash);
+
     debug!(
-        "Extracted TLS fingerprint: {} (SNI: {:?}, known: {})",
-        fingerprint, client_hello.sni, is_known_good
+        "Extracted TLS fingerprint: {} / JA3: {} (SNI: {:?}, known_good: {}, malicious: {})",
+        fingerprint, ja3_hash, client_hello.sni, is_known_good, is_known_malicious
     );
 
     Some(TlsFingerprint {
         fingerprint,
+        ja3_hash,
+        ja3_string,
         tls_version: actual_version,
         cipher_count: client_hello.cipher_suites.len(),
         extension_count: client_hello.extensions.len(),
         sni: client_hello.sni,
         is_known_good,
         known_match,
+        is_known_malicious,
+        malicious_match,
+        threat_category,
     })
 }
 
@@ -320,6 +452,101 @@ fn hash_component(data: &str) -> String {
     hasher.update(data.as_bytes());
     let result = hasher.finalize();
     hex::encode(&result[..6]) // First 6 bytes = 12 hex chars
+}
+
+/// Generates a JA3 fingerprint from TLS Client Hello components.
+///
+/// JA3 format: `SSLVersion,Ciphers,Extensions,EllipticCurves,EllipticCurvePointFormats`
+/// Returns (ja3_string, ja3_hash) where ja3_hash is the MD5 of ja3_string.
+///
+/// # JA3 Specification
+/// - SSLVersion: Decimal representation of the TLS version (e.g., 771 for TLS 1.2)
+/// - Ciphers: Comma-separated decimal cipher suite values (GREASE values removed)
+/// - Extensions: Comma-separated decimal extension type values (GREASE values removed)
+/// - EllipticCurves: Comma-separated decimal supported group values (GREASE values removed)
+/// - EllipticCurvePointFormats: Comma-separated decimal point format values
+fn generate_ja3(
+    version: TlsVersion,
+    cipher_suites: &[u16],
+    extensions: &[u16],
+    elliptic_curves: &[u16],
+    ec_point_formats: &[u8],
+) -> (String, String) {
+    // Convert TLS version to decimal (e.g., TLS 1.2 = 0x0303 = 771)
+    let version_decimal = version.0;
+
+    // Filter out GREASE values (0x?a?a pattern)
+    let filter_grease_u16 = |v: &u16| -> bool {
+        let high = (v >> 8) as u8;
+        let low = (v & 0xff) as u8;
+        !(high == low && (high & 0x0f) == 0x0a)
+    };
+
+    // Build cipher string (comma-separated decimals, no GREASE)
+    let ciphers_str: String = cipher_suites
+        .iter()
+        .filter(|c| filter_grease_u16(c))
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // Build extensions string (comma-separated decimals, no GREASE)
+    let extensions_str: String = extensions
+        .iter()
+        .filter(|e| filter_grease_u16(e))
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // Build elliptic curves string (comma-separated decimals, no GREASE)
+    let curves_str: String = elliptic_curves
+        .iter()
+        .filter(|c| filter_grease_u16(c))
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // Build EC point formats string (comma-separated decimals)
+    let formats_str: String = ec_point_formats
+        .iter()
+        .map(|f| f.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // Compose JA3 string
+    let ja3_string = format!(
+        "{},{},{},{},{}",
+        version_decimal, ciphers_str, extensions_str, curves_str, formats_str
+    );
+
+    // Calculate MD5 hash
+    let mut hasher = Md5::new();
+    hasher.update(ja3_string.as_bytes());
+    let result = hasher.finalize();
+    let ja3_hash = hex::encode(result);
+
+    trace!("Generated JA3: {} -> {}", ja3_string, ja3_hash);
+
+    (ja3_string, ja3_hash)
+}
+
+/// Checks if a JA3 hash matches any known malicious fingerprint.
+fn check_malicious_ja3(ja3_hash: &str) -> (bool, Option<String>, Option<ThreatCategory>) {
+    for known in KNOWN_MALICIOUS_JA3 {
+        if known.ja3_hash == ja3_hash {
+            debug!(
+                "Matched malicious JA3 fingerprint: {} ({})",
+                known.description, known.category
+            );
+            return (
+                true,
+                Some(known.description.to_string()),
+                Some(known.category),
+            );
+        }
+    }
+
+    (false, None, None)
 }
 
 /// Checks if a fingerprint matches any known-good fingerprint.
@@ -511,5 +738,131 @@ mod tests {
         assert_eq!(format!("{}", TlsStatus::Fingerprinted), "TLS");
         assert_eq!(format!("{}", TlsStatus::TlsNoFingerprint), "TLS (No FP)");
         assert_eq!(format!("{}", TlsStatus::Plaintext), "Plaintext");
+    }
+
+    // JA3 fingerprint tests
+
+    #[test]
+    fn test_ja3_generation_deterministic() {
+        let version = TlsVersion::Tls12;
+        let ciphers = vec![0x1301, 0x1302, 0x1303];
+        let extensions = vec![0, 5, 10, 13, 43, 51];
+        let curves = vec![23, 24, 25]; // secp256r1, secp384r1, secp521r1
+        let formats = vec![0]; // uncompressed
+
+        let (str1, hash1) = generate_ja3(version, &ciphers, &extensions, &curves, &formats);
+        let (str2, hash2) = generate_ja3(version, &ciphers, &extensions, &curves, &formats);
+
+        assert_eq!(str1, str2, "JA3 string generation should be deterministic");
+        assert_eq!(hash1, hash2, "JA3 hash generation should be deterministic");
+    }
+
+    #[test]
+    fn test_ja3_format() {
+        let version = TlsVersion::Tls12; // 0x0303 = 771
+        let ciphers = vec![0x1301, 0x1302];
+        let extensions = vec![0, 5, 10];
+        let curves = vec![23, 24];
+        let formats = vec![0, 1];
+
+        let (ja3_string, ja3_hash) = generate_ja3(version, &ciphers, &extensions, &curves, &formats);
+
+        // JA3 string format: version,ciphers,extensions,curves,formats
+        let parts: Vec<&str> = ja3_string.split(',').collect();
+
+        // First part should be version (771 for TLS 1.2)
+        assert_eq!(parts[0], "771", "Version should be 771 for TLS 1.2");
+
+        // Hash should be 32 hex characters (MD5)
+        assert_eq!(ja3_hash.len(), 32, "JA3 hash should be 32 hex characters");
+        assert!(
+            ja3_hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "JA3 hash should only contain hex characters"
+        );
+    }
+
+    #[test]
+    fn test_ja3_grease_filtering() {
+        let version = TlsVersion::Tls12;
+        // Include GREASE values (0x0a0a, 0x1a1a, etc.)
+        let ciphers_with_grease = vec![0x0a0a, 0x1301, 0x1a1a, 0x1302];
+        let ciphers_without_grease = vec![0x1301, 0x1302];
+        let extensions = vec![0, 5];
+        let curves = vec![23];
+        let formats = vec![0];
+
+        let (str_with_grease, _) =
+            generate_ja3(version, &ciphers_with_grease, &extensions, &curves, &formats);
+        let (str_without_grease, _) =
+            generate_ja3(version, &ciphers_without_grease, &extensions, &curves, &formats);
+
+        // GREASE values should be filtered out, so both should produce same result
+        assert_eq!(
+            str_with_grease, str_without_grease,
+            "GREASE values should be filtered from JA3"
+        );
+    }
+
+    #[test]
+    fn test_ja3_different_versions() {
+        let ciphers = vec![0x1301];
+        let extensions = vec![0, 5];
+        let curves = vec![23];
+        let formats = vec![0];
+
+        let (str_tls12, _) =
+            generate_ja3(TlsVersion::Tls12, &ciphers, &extensions, &curves, &formats);
+        let (str_tls11, _) =
+            generate_ja3(TlsVersion::Tls11, &ciphers, &extensions, &curves, &formats);
+
+        assert_ne!(
+            str_tls12, str_tls11,
+            "Different TLS versions should produce different JA3 strings"
+        );
+
+        // TLS 1.2 = 771, TLS 1.1 = 770
+        assert!(str_tls12.starts_with("771,"));
+        assert!(str_tls11.starts_with("770,"));
+    }
+
+    #[test]
+    fn test_check_malicious_ja3() {
+        // Test known malicious fingerprint detection
+        let cobalt_strike_ja3 = "e7d705a3286e19ea42f587b344ee6865";
+        let (is_malicious, desc, category) = check_malicious_ja3(cobalt_strike_ja3);
+
+        assert!(is_malicious, "Known Cobalt Strike JA3 should be detected");
+        assert!(
+            desc.as_ref().map(|d| d.contains("Cobalt Strike")).unwrap_or(false),
+            "Description should mention Cobalt Strike"
+        );
+        assert_eq!(category, Some(ThreatCategory::C2Framework));
+
+        // Test unknown fingerprint
+        let unknown_ja3 = "0000000000000000000000000000000a";
+        let (is_malicious_unknown, _, _) = check_malicious_ja3(unknown_ja3);
+        assert!(!is_malicious_unknown, "Unknown JA3 should not be flagged");
+    }
+
+    #[test]
+    fn test_threat_category_display() {
+        assert_eq!(format!("{}", ThreatCategory::C2Framework), "C2 Framework");
+        assert_eq!(format!("{}", ThreatCategory::Malware), "Malware");
+        assert_eq!(format!("{}", ThreatCategory::Suspicious), "Suspicious");
+    }
+
+    #[test]
+    fn test_ja3_empty_components() {
+        let version = TlsVersion::Tls12;
+        let ciphers: Vec<u16> = vec![];
+        let extensions: Vec<u16> = vec![];
+        let curves: Vec<u16> = vec![];
+        let formats: Vec<u8> = vec![];
+
+        let (ja3_string, ja3_hash) = generate_ja3(version, &ciphers, &extensions, &curves, &formats);
+
+        // Should still generate valid format with empty sections
+        assert!(ja3_string.starts_with("771,"));
+        assert_eq!(ja3_hash.len(), 32);
     }
 }
