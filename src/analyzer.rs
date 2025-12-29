@@ -36,6 +36,7 @@ use crate::dns_detector::{
     is_dns_port, parse_dns_query, DnsAnalysisResult, DnsDetector, DnsDetectorConfig, DnsFlowTracker,
 };
 use crate::error::Result;
+use crate::geo::{GeoInfo, SharedGeoLookup};
 use crate::tls_fingerprint::{extract_fingerprint, is_tls_port, TlsFingerprint, TlsStatus};
 
 /// Classification of flow behavior based on CV analysis.
@@ -436,6 +437,8 @@ pub struct FlowAnalysis {
     pub dns_analysis: Option<DnsAnalysisResult>,
     /// Detection indicators for this flow.
     pub indicators: Vec<String>,
+    /// Geographic information for destination IP.
+    pub geo_info: Option<GeoInfo>,
 }
 
 /// The main flow analyzer - consumes FlowEvents and performs analysis.
@@ -445,6 +448,7 @@ pub struct FlowAnalyzer {
     detector: Box<dyn Detector>,
     dns_detector: DnsDetector,
     events_processed: u64,
+    geo_lookup: Option<SharedGeoLookup>,
 }
 
 impl FlowAnalyzer {
@@ -461,7 +465,14 @@ impl FlowAnalyzer {
             detector,
             dns_detector,
             events_processed: 0,
+            geo_lookup: None,
         }
+    }
+
+    /// Sets the GeoIP lookup service.
+    pub fn with_geo_lookup(mut self, geo_lookup: SharedGeoLookup) -> Self {
+        self.geo_lookup = Some(geo_lookup);
+        self
     }
 
     /// Processes a single flow event.
@@ -581,8 +592,23 @@ impl FlowAnalyzer {
                     protocol_mismatch = true;
                 }
 
-                // Report suspicious flows (periodic OR DNS tunneling OR protocol mismatch)
-                if is_periodic || dns_suspicious || protocol_mismatch {
+                // Perform GeoIP lookup for destination
+                let geo_info = self.geo_lookup.as_ref().map(|geo| {
+                    geo.lookup(flow_data.flow_key.dst_ip)
+                });
+
+                // Check for high-risk geo destination
+                let geo_high_risk = geo_info
+                    .as_ref()
+                    .map(|g| g.risk == crate::geo::GeoRisk::High)
+                    .unwrap_or(false);
+
+                if geo_high_risk {
+                    indicators.push("high_risk_geo".to_string());
+                }
+
+                // Report suspicious flows (periodic OR DNS tunneling OR protocol mismatch OR high-risk geo)
+                if is_periodic || dns_suspicious || protocol_mismatch || geo_high_risk {
                     suspicious_flows.push(FlowAnalysis {
                         flow_key: flow_data.flow_key.clone(),
                         classification: result.classification,
@@ -595,6 +621,7 @@ impl FlowAnalyzer {
                         tls_status: flow_data.tls_status,
                         dns_analysis,
                         indicators,
+                        geo_info,
                     });
                 }
             }
@@ -667,9 +694,13 @@ pub async fn run_analyzer(
     mut rx: mpsc::Receiver<FlowEvent>,
     report_tx: mpsc::Sender<AnalysisReport>,
     config: AnalyzerConfig,
+    geo_lookup: Option<SharedGeoLookup>,
 ) -> Result<()> {
     let analysis_interval = Duration::from_secs(config.analysis_interval_secs);
     let mut analyzer = FlowAnalyzer::new(config);
+    if let Some(geo) = geo_lookup {
+        analyzer = analyzer.with_geo_lookup(geo);
+    }
     let mut interval = interval(analysis_interval);
 
     info!(
