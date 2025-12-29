@@ -18,12 +18,14 @@
 //! - **Analyzer**: Async task aggregating flows and computing CV metrics
 //! - **UI**: Real-time TUI dashboard showing suspicious flows
 
+mod alerting;
 mod analyzer;
 mod capture;
 mod config;
 mod dns_detector;
 mod error;
 mod export;
+mod geo;
 mod http_detector;
 mod metrics;
 mod replay;
@@ -39,10 +41,12 @@ use tokio::sync::mpsc;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
+use crate::alerting::new_shared_alert_service;
 use crate::analyzer::{run_analyzer, AnalyzerConfig};
 use crate::capture::{list_devices, CaptureConfig, PacketCapture};
 use crate::config::Config;
 use crate::export::{export_report, OutputFormat};
+use crate::geo::new_shared_geo_lookup;
 use crate::replay::{PcapReplay, ReplayConfig};
 use crate::ui::run_ui;
 
@@ -221,8 +225,8 @@ async fn main() -> Result<()> {
             }
 
             // CLI args override config file
-            let interface = interface.or(file_config.capture.interface);
-            let filter = filter.or(file_config.capture.filter);
+            let interface = interface.or(file_config.capture.interface.clone());
+            let filter = filter.or(file_config.capture.filter.clone());
 
             run_capture(
                 interface,
@@ -234,6 +238,7 @@ async fn main() -> Result<()> {
                 channel_size,
                 no_ui,
                 output.into(),
+                &file_config,
             )
             .await
         }
@@ -307,6 +312,7 @@ async fn run_capture(
     channel_size: usize,
     no_ui: bool,
     output_format: OutputFormat,
+    config: &Config,
 ) -> Result<()> {
     info!("Starting Network-Beacon capture...");
 
@@ -328,6 +334,31 @@ async fn run_capture(
         flow_ttl_secs: flow_ttl,
     };
 
+    // Create GeoIP lookup
+    let geo_lookup = if config.geo.enabled {
+        let geo = new_shared_geo_lookup(&config.geo);
+        if geo.is_available() {
+            info!("GeoIP enrichment enabled");
+            Some(geo)
+        } else {
+            info!("GeoIP enrichment enabled but databases not available");
+            None
+        }
+    } else {
+        None
+    };
+
+    // Create alerting service (for future use with real-time alerts)
+    let _alert_service = if config.alerting.enabled {
+        info!(
+            "Alerting enabled: {} webhooks configured",
+            config.alerting.webhooks.len()
+        );
+        Some(new_shared_alert_service(config.alerting.clone()))
+    } else {
+        None
+    };
+
     // Create channels
     let (report_tx, report_rx) = mpsc::channel(100);
 
@@ -339,8 +370,9 @@ async fn run_capture(
     info!("Packet capture started");
 
     // Start analyzer (consumer)
+    let geo_for_analyzer = geo_lookup.clone();
     let analyzer_handle = tokio::spawn(async move {
-        if let Err(e) = run_analyzer(event_rx, report_tx, analyzer_config).await {
+        if let Err(e) = run_analyzer(event_rx, report_tx, analyzer_config, geo_for_analyzer).await {
             error!("Analyzer error: {}", e);
         }
     });
@@ -395,9 +427,9 @@ async fn run_replay(
     let replay = PcapReplay::new(file.to_str().unwrap_or(""), replay_config);
     let event_rx = replay.start()?;
 
-    // Start analyzer
+    // Start analyzer (no geo lookup in replay mode for now)
     let analyzer_handle = tokio::spawn(async move {
-        if let Err(e) = run_analyzer(event_rx, report_tx, analyzer_config).await {
+        if let Err(e) = run_analyzer(event_rx, report_tx, analyzer_config, None).await {
             error!("Analyzer error: {}", e);
         }
     });
