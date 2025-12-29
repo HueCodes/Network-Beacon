@@ -8,7 +8,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::alerting::AlertingConfig;
 use crate::export::OutputFormat;
+use crate::geo::GeoConfig;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -18,6 +20,8 @@ pub struct Config {
     pub analyzer: AnalyzerConfig,
     pub detection: DetectionConfig,
     pub output: OutputConfig,
+    pub geo: GeoConfig,
+    pub alerting: AlertingConfig,
 }
 
 impl Config {
