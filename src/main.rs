@@ -24,6 +24,8 @@ mod config;
 mod dns_detector;
 mod error;
 mod export;
+mod http_detector;
+mod metrics;
 mod replay;
 mod tls_fingerprint;
 mod ui;
