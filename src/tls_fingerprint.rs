@@ -23,7 +23,6 @@
 //!
 //! Example: `t13_a0b1c2d3e4f5_f6e5d4c3b2a1`
 
-use md5::{Digest as Md5Digest, Md5};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use tls_parser::{
@@ -83,7 +82,7 @@ pub static KNOWN_MALICIOUS_JA3: &[KnownJa3Fingerprint] = &[
 ];
 
 /// Category of threat for JA3 fingerprints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThreatCategory {
     /// Known C2 framework (Cobalt Strike, Metasploit, etc.)
     C2Framework,
@@ -520,10 +519,7 @@ fn generate_ja3(
     );
 
     // Calculate MD5 hash
-    let mut hasher = Md5::new();
-    hasher.update(ja3_string.as_bytes());
-    let result = hasher.finalize();
-    let ja3_hash = hex::encode(result);
+    let ja3_hash = format!("{:x}", md5::compute(ja3_string.as_bytes()));
 
     trace!("Generated JA3: {} -> {}", ja3_string, ja3_hash);
 
