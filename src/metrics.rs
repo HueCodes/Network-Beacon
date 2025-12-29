@@ -48,6 +48,10 @@ pub struct Metrics {
     pub protocol_mismatch_detections: AtomicU64,
     /// Periodic beacon detections (CV-based)
     pub periodic_beacon_detections: AtomicU64,
+    /// High-risk geographic destination flows
+    pub geo_high_risk_flows: AtomicU64,
+    /// Total alerts sent
+    pub alerts_sent_total: AtomicU64,
     /// Last analysis timestamp (Unix epoch milliseconds)
     pub last_analysis_timestamp: AtomicU64,
 }
@@ -66,6 +70,8 @@ impl Metrics {
             http_beacon_detections: AtomicU64::new(0),
             protocol_mismatch_detections: AtomicU64::new(0),
             periodic_beacon_detections: AtomicU64::new(0),
+            geo_high_risk_flows: AtomicU64::new(0),
+            alerts_sent_total: AtomicU64::new(0),
             last_analysis_timestamp: AtomicU64::new(0),
         }
     }
@@ -78,6 +84,11 @@ impl Metrics {
     /// Increment packets by a specific amount.
     pub fn add_packets(&self, count: u64) {
         self.packets_total.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Increment alerts sent counter.
+    pub fn inc_alerts(&self) {
+        self.alerts_sent_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Update metrics from an analysis report.
@@ -99,6 +110,7 @@ impl Metrics {
         let mut http_count: u64 = 0;
         let mut protocol_mismatch_count: u64 = 0;
         let mut periodic_count: u64 = 0;
+        let mut geo_high_risk_count: u64 = 0;
 
         for flow in &report.suspicious_flows {
             for indicator in &flow.indicators {
@@ -110,6 +122,7 @@ impl Metrics {
                         protocol_mismatch_count += 1
                     }
                     "periodic_beacon" => periodic_count += 1,
+                    "high_risk_geo" => geo_high_risk_count += 1,
                     _ => {}
                 }
             }
@@ -132,6 +145,8 @@ impl Metrics {
             .store(protocol_mismatch_count, Ordering::Relaxed);
         self.periodic_beacon_detections
             .store(periodic_count, Ordering::Relaxed);
+        self.geo_high_risk_flows
+            .store(geo_high_risk_count, Ordering::Relaxed);
     }
 
     /// Export metrics in Prometheus text format.
@@ -223,6 +238,24 @@ impl Metrics {
         output.push_str(&format!(
             "network_beacon_periodic_detections {}\n\n",
             self.periodic_beacon_detections.load(Ordering::Relaxed)
+        ));
+
+        // High-risk geo flows
+        output.push_str(
+            "# HELP network_beacon_geo_high_risk_flows High-risk geographic destination flows\n",
+        );
+        output.push_str("# TYPE network_beacon_geo_high_risk_flows gauge\n");
+        output.push_str(&format!(
+            "network_beacon_geo_high_risk_flows {}\n\n",
+            self.geo_high_risk_flows.load(Ordering::Relaxed)
+        ));
+
+        // Alerts sent total
+        output.push_str("# HELP network_beacon_alerts_sent_total Total alerts sent\n");
+        output.push_str("# TYPE network_beacon_alerts_sent_total counter\n");
+        output.push_str(&format!(
+            "network_beacon_alerts_sent_total {}\n\n",
+            self.alerts_sent_total.load(Ordering::Relaxed)
         ));
 
         // Last analysis timestamp
@@ -455,6 +488,7 @@ mod tests {
                     "periodic_beacon".to_string(),
                     "dns_tunneling".to_string(),
                 ],
+                geo_info: None,
             }],
             events_processed: 10000,
         };
