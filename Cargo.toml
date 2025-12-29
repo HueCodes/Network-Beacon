@@ -53,6 +53,12 @@ serde_json = "1.0"
 # Configuration
 toml = "0.8"
 
+# GeoIP lookups
+maxminddb = "0.24"
+
+# HTTP client for webhooks
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
 [dev-dependencies]
 tokio-test = "0.4"
 
