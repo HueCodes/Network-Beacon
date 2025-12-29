@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 
 use crate::analyzer::{AnalysisReport, FlowAnalysis, FlowClassification};
 use crate::error::Result;
+use crate::geo::GeoRisk;
 use crate::tls_fingerprint::TlsStatus;
 
 /// Terminal type alias for convenience.
@@ -313,6 +314,7 @@ fn render_flows_table(frame: &mut Frame, area: Rect, app: &mut App) {
         "Severity",
         "Source IP",
         "Dest IP:Port",
+        "Geo",
         "CV",
         "Interval",
         "Indicators",
@@ -356,6 +358,9 @@ fn render_flows_table(frame: &mut Frame, area: Rect, app: &mut App) {
                 // Format indicators with color coding
                 let (indicators_display, indicators_style) = format_indicators(flow);
 
+                // Format geo info
+                let (geo_display, geo_style) = format_geo(flow);
+
                 Row::new(vec![
                     Cell::from(flow.classification.severity()).style(severity_style),
                     Cell::from(flow.flow_key.src_ip.to_string()),
@@ -363,6 +368,7 @@ fn render_flows_table(frame: &mut Frame, area: Rect, app: &mut App) {
                         "{}:{}",
                         flow.flow_key.dst_ip, flow.flow_key.dst_port
                     )),
+                    Cell::from(geo_display).style(geo_style),
                     Cell::from(cv_str),
                     Cell::from(interval_str),
                     Cell::from(indicators_display).style(indicators_style),
@@ -378,9 +384,10 @@ fn render_flows_table(frame: &mut Frame, area: Rect, app: &mut App) {
             Constraint::Length(10),
             Constraint::Length(16),
             Constraint::Length(22),
+            Constraint::Length(6),
             Constraint::Length(8),
             Constraint::Length(10),
-            Constraint::Length(30),
+            Constraint::Length(25),
         ],
     )
     .header(header)
@@ -520,6 +527,23 @@ fn format_indicators(flow: &FlowAnalysis) -> (String, Style) {
     (display, style)
 }
 
+/// Formats geo information for display.
+/// Returns (display_string, style).
+fn format_geo(flow: &FlowAnalysis) -> (String, Style) {
+    match &flow.geo_info {
+        Some(geo) => {
+            let display = geo.country_display();
+            let style = match geo.risk {
+                GeoRisk::High => Style::default().fg(Color::Red).bold(),
+                GeoRisk::Elevated => Style::default().fg(Color::Yellow),
+                GeoRisk::None => Style::default().fg(Color::White),
+            };
+            (display, style)
+        }
+        None => ("--".to_string(), Style::default().fg(Color::DarkGray)),
+    }
+}
+
 fn render_footer(frame: &mut Frame, area: Rect) {
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(" q", Style::default().fg(Color::Yellow)),
@@ -645,56 +669,92 @@ fn render_detail_overlay(frame: &mut Frame, flow: &FlowAnalysis) {
             Span::styled("Protocol:       ", Style::default().fg(Color::Gray)),
             Span::raw(format!("{}", flow.flow_key.protocol)),
         ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("CV Score:       ", Style::default().fg(Color::Gray)),
-            Span::raw(
-                flow.cv
-                    .map(|cv| format!("{:.4}", cv))
-                    .unwrap_or_else(|| "N/A".to_string()),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Mean Interval:  ", Style::default().fg(Color::Gray)),
-            Span::raw(
-                flow.mean_interval_ms
-                    .map(|ms| {
-                        if ms >= 1000.0 {
-                            format!("{:.2} seconds", ms / 1000.0)
-                        } else {
-                            format!("{:.2} ms", ms)
-                        }
-                    })
-                    .unwrap_or_else(|| "N/A".to_string()),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Packets:        ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{}", flow.packet_count)),
-        ]),
-        Line::from(vec![
-            Span::styled("Total Bytes:    ", Style::default().fg(Color::Gray)),
-            Span::raw(format_bytes(flow.total_bytes)),
-        ]),
-        Line::from(vec![
-            Span::styled("Duration:       ", Style::default().fg(Color::Gray)),
-            Span::raw(format_duration(flow.duration_secs)),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "TLS Information",
-            Style::default().bold().fg(Color::Cyan),
-        )),
-        Line::from(vec![
-            Span::styled("TLS Status:     ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{}", flow.tls_status)),
-        ]),
-        Line::from(vec![
-            Span::styled("Fingerprint:    ", Style::default().fg(Color::Gray)),
-            Span::styled(tls_fp_display, tls_fp_style),
-        ]),
     ];
+
+    // Add geo information if available
+    if let Some(ref geo) = flow.geo_info {
+        let geo_style = match geo.risk {
+            GeoRisk::High => Style::default().fg(Color::Red).bold(),
+            GeoRisk::Elevated => Style::default().fg(Color::Yellow),
+            GeoRisk::None => Style::default().fg(Color::White),
+        };
+
+        detail_text.push(Line::from(vec![
+            Span::styled("Country:        ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                geo.country_name.clone().unwrap_or_else(|| geo.country_display()),
+                geo_style,
+            ),
+        ]));
+
+        if let Some(asn) = geo.asn {
+            detail_text.push(Line::from(vec![
+                Span::styled("ASN:            ", Style::default().fg(Color::Gray)),
+                Span::raw(format!("AS{}", asn)),
+            ]));
+        }
+
+        if let Some(ref org) = geo.asn_org {
+            detail_text.push(Line::from(vec![
+                Span::styled("Organization:   ", Style::default().fg(Color::Gray)),
+                Span::raw(org.clone()),
+            ]));
+        }
+
+        detail_text.push(Line::from(vec![
+            Span::styled("Geo Risk:       ", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{}", geo.risk), geo_style),
+        ]));
+    }
+
+    detail_text.push(Line::from(vec![
+        Span::styled("CV Score:       ", Style::default().fg(Color::Gray)),
+        Span::raw(
+            flow.cv
+                .map(|cv| format!("{:.4}", cv))
+                .unwrap_or_else(|| "N/A".to_string()),
+        ),
+    ]));
+    detail_text.push(Line::from(vec![
+        Span::styled("Mean Interval:  ", Style::default().fg(Color::Gray)),
+        Span::raw(
+            flow.mean_interval_ms
+                .map(|ms| {
+                    if ms >= 1000.0 {
+                        format!("{:.2} seconds", ms / 1000.0)
+                    } else {
+                        format!("{:.2} ms", ms)
+                    }
+                })
+                .unwrap_or_else(|| "N/A".to_string()),
+        ),
+    ]));
+    detail_text.push(Line::from(""));
+    detail_text.push(Line::from(vec![
+        Span::styled("Packets:        ", Style::default().fg(Color::Gray)),
+        Span::raw(format!("{}", flow.packet_count)),
+    ]));
+    detail_text.push(Line::from(vec![
+        Span::styled("Total Bytes:    ", Style::default().fg(Color::Gray)),
+        Span::raw(format_bytes(flow.total_bytes)),
+    ]));
+    detail_text.push(Line::from(vec![
+        Span::styled("Duration:       ", Style::default().fg(Color::Gray)),
+        Span::raw(format_duration(flow.duration_secs)),
+    ]));
+    detail_text.push(Line::from(""));
+    detail_text.push(Line::from(Span::styled(
+        "TLS Information",
+        Style::default().bold().fg(Color::Cyan),
+    )));
+    detail_text.push(Line::from(vec![
+        Span::styled("TLS Status:     ", Style::default().fg(Color::Gray)),
+        Span::raw(format!("{}", flow.tls_status)),
+    ]));
+    detail_text.push(Line::from(vec![
+        Span::styled("Fingerprint:    ", Style::default().fg(Color::Gray)),
+        Span::styled(tls_fp_display, tls_fp_style),
+    ]));
 
     // Add additional TLS info if available
     detail_text.extend(tls_info);
