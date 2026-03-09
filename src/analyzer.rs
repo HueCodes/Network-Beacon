@@ -32,16 +32,16 @@ use tokio::time::interval;
 use tracing::{debug, info, trace};
 
 use crate::capture::{FlowEvent, FlowKey, Protocol};
+use crate::config::DetectionConfig;
 use crate::dns_detector::{
-    is_dns_port, parse_dns_query, DnsAnalysisResult, DnsDetector, DnsDetectorConfig, DnsFlowTracker,
+    is_dns_port_in, parse_dns_query, DnsAnalysisResult, DnsDetector, DnsFlowTracker,
 };
 use crate::error::Result;
 use crate::geo::{GeoInfo, SharedGeoLookup};
 use crate::http_detector::{
-    is_http_port, parse_http_request, HttpAnalysisResult, HttpDetector, HttpDetectorConfig,
-    HttpFlowTracker,
+    is_http_port_in, parse_http_request, HttpAnalysisResult, HttpDetector, HttpFlowTracker,
 };
-use crate::tls_fingerprint::{extract_fingerprint, is_tls_port, TlsFingerprint, TlsStatus};
+use crate::tls_fingerprint::{extract_fingerprint, is_tls_port_in, TlsFingerprint, TlsStatus};
 
 /// Classification of flow behavior based on CV analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,15 +268,16 @@ pub struct FlowData {
 }
 
 impl FlowData {
-    pub fn new(event: &FlowEvent) -> Self {
+    pub fn new(event: &FlowEvent, detection_config: &DetectionConfig) -> Self {
         // Determine initial TLS status based on port and protocol
-        let (tls_fingerprint, tls_status) = Self::extract_tls_info(event);
+        let (tls_fingerprint, tls_status) =
+            Self::extract_tls_info(event, &detection_config.tls_ports);
 
         // Initialize DNS tracker if this is a DNS flow
-        let dns_tracker = Self::init_dns_tracker(event);
+        let dns_tracker = Self::init_dns_tracker(event, &detection_config.dns_ports);
 
         // Initialize HTTP tracker if this is an HTTP flow
-        let http_tracker = Self::init_http_tracker(event);
+        let http_tracker = Self::init_http_tracker(event, &detection_config.http_ports);
 
         Self {
             flow_key: event.flow_key.clone(),
@@ -296,8 +297,10 @@ impl FlowData {
     }
 
     /// Initializes DNS tracker if this is a DNS flow with payload
-    fn init_dns_tracker(event: &FlowEvent) -> Option<DnsFlowTracker> {
-        if event.flow_key.protocol != Protocol::Udp || !is_dns_port(event.flow_key.dst_port) {
+    fn init_dns_tracker(event: &FlowEvent, dns_ports: &[u16]) -> Option<DnsFlowTracker> {
+        if event.flow_key.protocol != Protocol::Udp
+            || !is_dns_port_in(event.flow_key.dst_port, dns_ports)
+        {
             return None;
         }
 
@@ -313,8 +316,10 @@ impl FlowData {
     }
 
     /// Initializes HTTP tracker if this is an HTTP flow with payload
-    fn init_http_tracker(event: &FlowEvent) -> Option<HttpFlowTracker> {
-        if event.flow_key.protocol != Protocol::Tcp || !is_http_port(event.flow_key.dst_port) {
+    fn init_http_tracker(event: &FlowEvent, http_ports: &[u16]) -> Option<HttpFlowTracker> {
+        if event.flow_key.protocol != Protocol::Tcp
+            || !is_http_port_in(event.flow_key.dst_port, http_ports)
+        {
             return None;
         }
 
@@ -330,7 +335,10 @@ impl FlowData {
     }
 
     /// Extracts TLS fingerprint information from a flow event.
-    fn extract_tls_info(event: &FlowEvent) -> (Option<TlsFingerprint>, TlsStatus) {
+    fn extract_tls_info(
+        event: &FlowEvent,
+        tls_ports: &[u16],
+    ) -> (Option<TlsFingerprint>, TlsStatus) {
         // Must be TCP for TLS
         if event.flow_key.protocol != Protocol::Tcp {
             return (None, TlsStatus::Plaintext);
@@ -340,7 +348,7 @@ impl FlowData {
         // This works for both standard TLS ports AND non-standard ports (protocol mismatch detection)
         if let Some(ref payload) = event.tls_payload {
             if let Some(fingerprint) = extract_fingerprint(payload) {
-                if !is_tls_port(event.flow_key.dst_port) {
+                if !is_tls_port_in(event.flow_key.dst_port, tls_ports) {
                     tracing::debug!(
                         "TLS fingerprint on non-standard port {}: {}",
                         event.flow_key.dst_port,
@@ -358,7 +366,7 @@ impl FlowData {
         }
 
         // For standard TLS ports without fingerprint, mark as TLS but no FP
-        if is_tls_port(event.flow_key.dst_port) {
+        if is_tls_port_in(event.flow_key.dst_port, tls_ports) {
             return (None, TlsStatus::TlsNoFingerprint);
         }
 
@@ -367,7 +375,7 @@ impl FlowData {
     }
 
     /// Adds a new event to this flow's data.
-    pub fn add_event(&mut self, event: &FlowEvent) {
+    pub fn add_event(&mut self, event: &FlowEvent, detection_config: &DetectionConfig) {
         self.timestamps.push(event.timestamp);
         self.total_bytes += event.packet_size as u64;
         self.packet_count += 1;
@@ -376,7 +384,7 @@ impl FlowData {
         // Try to extract TLS fingerprint if we don't have one yet
         // Try for all TCP traffic (including non-standard ports for protocol mismatch detection)
         if self.tls_fingerprint.is_none() && event.flow_key.protocol == Protocol::Tcp {
-            let (fp, status) = Self::extract_tls_info(event);
+            let (fp, status) = Self::extract_tls_info(event, &detection_config.tls_ports);
             if fp.is_some() {
                 self.tls_fingerprint = fp;
                 self.tls_status = status;
@@ -485,6 +493,7 @@ pub struct FlowAnalysis {
 /// The main flow analyzer - consumes FlowEvents and performs analysis.
 pub struct FlowAnalyzer {
     config: AnalyzerConfig,
+    detection_config: DetectionConfig,
     flows: LruCache<FlowKey, FlowData>,
     detector: Box<dyn Detector>,
     dns_detector: DnsDetector,
@@ -494,16 +503,17 @@ pub struct FlowAnalyzer {
 }
 
 impl FlowAnalyzer {
-    pub fn new(config: AnalyzerConfig) -> Self {
+    pub fn new(config: AnalyzerConfig, detection_config: DetectionConfig) -> Self {
         let detector = Box::new(CvDetector::new(config.min_samples));
-        let dns_detector = DnsDetector::new(DnsDetectorConfig::default());
-        let http_detector = HttpDetector::new(HttpDetectorConfig::default());
+        let dns_detector = DnsDetector::new(detection_config.dns.clone());
+        let http_detector = HttpDetector::new(detection_config.http.clone());
         // Ensure max_flows is at least 1 to prevent panic
         let max_flows = std::num::NonZeroUsize::new(config.max_flows.max(1))
             .expect("max(1) guarantees non-zero");
 
         Self {
             config,
+            detection_config,
             flows: LruCache::new(max_flows),
             detector,
             dns_detector,
@@ -524,7 +534,7 @@ impl FlowAnalyzer {
         self.events_processed += 1;
 
         if let Some(flow_data) = self.flows.get_mut(&event.flow_key) {
-            flow_data.add_event(&event);
+            flow_data.add_event(&event, &self.detection_config);
 
             // Trim timestamps if exceeding limit
             if flow_data.timestamps.len() > self.config.max_timestamps_per_flow {
@@ -532,7 +542,7 @@ impl FlowAnalyzer {
                 flow_data.timestamps.drain(0..excess);
             }
         } else {
-            let flow_data = FlowData::new(&event);
+            let flow_data = FlowData::new(&event, &self.detection_config);
             self.flows.put(event.flow_key, flow_data);
         }
     }
@@ -647,14 +657,23 @@ impl FlowAnalyzer {
                 let mut protocol_mismatch = false;
 
                 // TLS on non-standard port (fingerprinted TLS but not on typical TLS ports)
-                if flow_data.tls_fingerprint.is_some() && !is_tls_port(flow_data.flow_key.dst_port)
+                if flow_data.tls_fingerprint.is_some()
+                    && !is_tls_port_in(
+                        flow_data.flow_key.dst_port,
+                        &self.detection_config.tls_ports,
+                    )
                 {
                     indicators.push("tls_on_nonstandard_port".to_string());
                     protocol_mismatch = true;
                 }
 
-                // DNS on non-standard port (we have DNS tracker but port is not 53/5353/5355)
-                if flow_data.dns_tracker.is_some() && !is_dns_port(flow_data.flow_key.dst_port) {
+                // DNS on non-standard port (we have DNS tracker but port is not in DNS port list)
+                if flow_data.dns_tracker.is_some()
+                    && !is_dns_port_in(
+                        flow_data.flow_key.dst_port,
+                        &self.detection_config.dns_ports,
+                    )
+                {
                     indicators.push("dns_on_nonstandard_port".to_string());
                     protocol_mismatch = true;
                 }
@@ -768,10 +787,11 @@ pub async fn run_analyzer(
     mut rx: mpsc::Receiver<FlowEvent>,
     report_tx: mpsc::Sender<AnalysisReport>,
     config: AnalyzerConfig,
+    detection_config: DetectionConfig,
     geo_lookup: Option<SharedGeoLookup>,
 ) -> Result<()> {
     let analysis_interval = Duration::from_secs(config.analysis_interval_secs);
-    let mut analyzer = FlowAnalyzer::new(config);
+    let mut analyzer = FlowAnalyzer::new(config, detection_config);
     if let Some(geo) = geo_lookup {
         analyzer = analyzer.with_geo_lookup(geo);
     }

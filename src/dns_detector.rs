@@ -15,11 +15,13 @@
 //! - Rapid queries to same domain indicate command/control channel
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, trace};
 
 /// DNS tunneling detection thresholds
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DnsDetectorConfig {
     /// Entropy threshold for suspicious labels (default: 3.5 bits/char)
     pub entropy_threshold: f64,
@@ -29,6 +31,8 @@ pub struct DnsDetectorConfig {
     pub min_queries_for_rate: usize,
     /// Query rate threshold in queries/second (default: 1.0)
     pub query_rate_threshold: f64,
+    /// Number of unique subdomains before flagging as suspicious
+    pub unique_subdomains_threshold: usize,
 }
 
 impl Default for DnsDetectorConfig {
@@ -38,6 +42,7 @@ impl Default for DnsDetectorConfig {
             max_label_length: 50,
             min_queries_for_rate: 5,
             query_rate_threshold: 1.0,
+            unique_subdomains_threshold: 10,
         }
     }
 }
@@ -263,7 +268,7 @@ impl DnsDetector {
 
         // Check for many unique subdomains (data encoding pattern)
         let unique_count = tracker.unique_subdomains.len();
-        if unique_count > 10 {
+        if unique_count > self.config.unique_subdomains_threshold {
             is_suspicious = true;
             indicators.push(DnsIndicator::ManySubdomains {
                 count: unique_count,
@@ -426,9 +431,17 @@ pub fn parse_dns_query(payload: &[u8]) -> Option<DnsQuery> {
     })
 }
 
-/// Check if a port is a DNS port
+/// Default DNS ports (standard DNS, mDNS, LLMNR)
+pub const DEFAULT_DNS_PORTS: &[u16] = &[53, 5353, 5355];
+
+/// Check if a port is a DNS port using the default port list.
 pub fn is_dns_port(port: u16) -> bool {
-    matches!(port, 53 | 5353 | 5355)
+    DEFAULT_DNS_PORTS.contains(&port)
+}
+
+/// Check if a port is a DNS port using a custom port list.
+pub fn is_dns_port_in(port: u16, ports: &[u16]) -> bool {
+    ports.contains(&port)
 }
 
 #[cfg(test)]

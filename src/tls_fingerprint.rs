@@ -589,9 +589,17 @@ fn validate_sni(sni: &str) -> Option<String> {
     Some(sni.to_string())
 }
 
-/// Checks if a destination port is likely TLS traffic.
+/// Default TLS ports.
+pub const DEFAULT_TLS_PORTS: &[u16] = &[443, 8443, 993, 995, 465, 636, 989, 990, 5061];
+
+/// Checks if a destination port is likely TLS traffic using the default port list.
 pub fn is_tls_port(port: u16) -> bool {
-    matches!(port, 443 | 8443 | 993 | 995 | 465 | 636 | 989 | 990 | 5061)
+    DEFAULT_TLS_PORTS.contains(&port)
+}
+
+/// Checks if a destination port is likely TLS traffic using a custom port list.
+pub fn is_tls_port_in(port: u16, ports: &[u16]) -> bool {
+    ports.contains(&port)
 }
 
 /// Classification of TLS traffic for display purposes.

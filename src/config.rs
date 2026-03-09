@@ -9,8 +9,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::alerting::AlertingConfig;
+use crate::dns_detector::DnsDetectorConfig;
 use crate::export::OutputFormat;
 use crate::geo::GeoConfig;
+use crate::http_detector::HttpDetectorConfig;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -71,6 +73,30 @@ impl Config {
         if self.detection.entropy_threshold <= 0.0 || self.detection.entropy_threshold >= 8.0 {
             anyhow::bail!("entropy_threshold must be between 0.0 and 8.0 (bits per char)");
         }
+        if self.detection.dns_ports.is_empty() {
+            anyhow::bail!("dns_ports must not be empty");
+        }
+        if self.detection.http_ports.is_empty() {
+            anyhow::bail!("http_ports must not be empty");
+        }
+        if self.detection.tls_ports.is_empty() {
+            anyhow::bail!("tls_ports must not be empty");
+        }
+        if self.capture.tls_payload_limit == 0 {
+            anyhow::bail!("tls_payload_limit must be greater than 0");
+        }
+        if self.capture.dns_payload_limit == 0 {
+            anyhow::bail!("dns_payload_limit must be greater than 0");
+        }
+        if self.capture.http_payload_limit == 0 {
+            anyhow::bail!("http_payload_limit must be greater than 0");
+        }
+        if self.detection.dns.unique_subdomains_threshold == 0 {
+            anyhow::bail!("unique_subdomains_threshold must be greater than 0");
+        }
+        if self.alerting.webhook_timeout_secs == 0 {
+            anyhow::bail!("webhook_timeout_secs must be greater than 0");
+        }
         Ok(())
     }
 }
@@ -89,6 +115,12 @@ pub struct CaptureConfig {
     pub timeout_ms: i32,
     /// Channel buffer size for flow events
     pub channel_capacity: usize,
+    /// Maximum bytes to capture from TLS Client Hello payloads
+    pub tls_payload_limit: usize,
+    /// Maximum bytes to capture from DNS payloads
+    pub dns_payload_limit: usize,
+    /// Maximum bytes to capture from HTTP request payloads
+    pub http_payload_limit: usize,
 }
 
 impl Default for CaptureConfig {
@@ -99,6 +131,9 @@ impl Default for CaptureConfig {
             promiscuous: true,
             timeout_ms: 100,
             channel_capacity: 10_000,
+            tls_payload_limit: 512,
+            dns_payload_limit: 512,
+            http_payload_limit: 2048,
         }
     }
 }
@@ -149,6 +184,16 @@ pub struct DetectionConfig {
     pub max_dns_label_length: usize,
     /// Detection profile (affects sensitivity)
     pub profile: DetectionProfile,
+    /// Ports considered DNS traffic
+    pub dns_ports: Vec<u16>,
+    /// Ports considered HTTP traffic
+    pub http_ports: Vec<u16>,
+    /// Ports considered TLS traffic
+    pub tls_ports: Vec<u16>,
+    /// DNS tunneling detection sub-config
+    pub dns: DnsDetectorConfig,
+    /// HTTP beacon detection sub-config
+    pub http: HttpDetectorConfig,
 }
 
 impl Default for DetectionConfig {
@@ -161,6 +206,11 @@ impl Default for DetectionConfig {
             entropy_threshold: 3.5,
             max_dns_label_length: 50,
             profile: DetectionProfile::Balanced,
+            dns_ports: vec![53, 5353, 5355],
+            http_ports: vec![80, 8080, 8000, 8008, 8888, 3000, 3128, 9000],
+            tls_ports: vec![443, 8443, 993, 995, 465, 636, 989, 990, 5061],
+            dns: DnsDetectorConfig::default(),
+            http: HttpDetectorConfig::default(),
         }
     }
 }
@@ -294,6 +344,19 @@ mod tests {
         assert!(config.validate().is_ok());
 
         config.analyzer.max_flows = 0;
+        assert!(config.validate().is_err());
+
+        // Reset and test other validations
+        let mut config = Config::default();
+        config.detection.dns_ports = vec![];
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.capture.tls_payload_limit = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.alerting.webhook_timeout_secs = 0;
         assert!(config.validate().is_err());
     }
 

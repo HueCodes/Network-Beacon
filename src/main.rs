@@ -317,19 +317,25 @@ async fn run_capture(
 ) -> Result<()> {
     info!("Starting Network-Beacon capture...");
 
+    // Apply environment variable overrides
+    let analysis_interval = env_override_u64("NETWORK_BEACON_ANALYSIS_INTERVAL", analysis_interval);
+    let min_samples = env_override_usize("NETWORK_BEACON_MIN_SAMPLES", min_samples);
+    let max_flows = env_override_usize("NETWORK_BEACON_MAX_FLOWS", max_flows);
+    let flow_ttl = env_override_u64("NETWORK_BEACON_FLOW_TTL", flow_ttl);
+
     // Configure capture
     let capture_config = CaptureConfig {
         device: interface,
         filter,
         channel_capacity: channel_size,
-        promiscuous: true,
-        timeout_ms: 100,
+        promiscuous: config.capture.promiscuous,
+        timeout_ms: config.capture.timeout_ms,
     };
 
     // Configure analyzer
     let analyzer_config = AnalyzerConfig {
         max_flows,
-        max_timestamps_per_flow: 1000,
+        max_timestamps_per_flow: config.analyzer.max_timestamps_per_flow,
         analysis_interval_secs: analysis_interval,
         min_samples,
         flow_ttl_secs: flow_ttl,
@@ -369,9 +375,12 @@ async fn run_capture(
     let metrics_shutdown = std::sync::Arc::new(tokio::sync::RwLock::new(false));
     let metrics_handle = if config.metrics.enabled {
         let metrics_config = MetricsServerConfig {
-            bind_address: metrics_bind
-                .parse()
-                .unwrap_or_else(|_| "127.0.0.1:9090".parse().unwrap()),
+            bind_address: metrics_bind.parse().unwrap_or_else(|_| {
+                crate::config::MetricsConfig::default()
+                    .bind_address
+                    .parse()
+                    .unwrap()
+            }),
             metrics_path: config.metrics.metrics_path.clone(),
         };
         let m = metrics.clone();
@@ -397,8 +406,17 @@ async fn run_capture(
 
     // Start analyzer (consumer)
     let geo_for_analyzer = geo_lookup.clone();
+    let detection_config = config.detection.clone();
     let analyzer_handle = tokio::spawn(async move {
-        if let Err(e) = run_analyzer(event_rx, report_tx, analyzer_config, geo_for_analyzer).await {
+        if let Err(e) = run_analyzer(
+            event_rx,
+            report_tx,
+            analyzer_config,
+            detection_config,
+            geo_for_analyzer,
+        )
+        .await
+        {
             error!("Analyzer error: {}", e);
         }
     });
@@ -448,16 +466,17 @@ async fn run_replay(
     let replay_config = ReplayConfig {
         speed,
         max_events,
-        channel_size: 10_000,
+        channel_size: crate::config::CaptureConfig::default().channel_capacity,
     };
 
-    // Configure analyzer
+    // Configure analyzer (use defaults with overrides for replay)
+    let default_analyzer = crate::config::AnalyzerConfig::default();
     let analyzer_config = AnalyzerConfig {
-        max_flows: 10_000,
-        max_timestamps_per_flow: 1000,
+        max_flows: default_analyzer.max_flows,
+        max_timestamps_per_flow: default_analyzer.max_timestamps_per_flow,
         analysis_interval_secs: 5, // Faster for replay
         min_samples,
-        flow_ttl_secs: 300,
+        flow_ttl_secs: default_analyzer.flow_ttl_secs,
     };
 
     // Create channels
@@ -468,8 +487,11 @@ async fn run_replay(
     let event_rx = replay.start()?;
 
     // Start analyzer (no geo lookup in replay mode for now)
+    let detection_config = crate::config::DetectionConfig::default();
     let analyzer_handle = tokio::spawn(async move {
-        if let Err(e) = run_analyzer(event_rx, report_tx, analyzer_config, None).await {
+        if let Err(e) =
+            run_analyzer(event_rx, report_tx, analyzer_config, detection_config, None).await
+        {
             error!("Analyzer error: {}", e);
         }
     });
@@ -692,4 +714,20 @@ async fn run_offline_analysis(
     }
 
     Ok(())
+}
+
+/// Reads an environment variable and parses it as u64, returning default if not set or invalid.
+fn env_override_u64(var: &str, default: u64) -> u64 {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Reads an environment variable and parses it as usize, returning default if not set or invalid.
+fn env_override_usize(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }

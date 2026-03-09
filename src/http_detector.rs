@@ -31,6 +31,8 @@ pub struct HttpDetectorConfig {
     pub max_size_variance: f64,
     /// Minimum POST request ratio to be suspicious.
     pub min_post_ratio: f64,
+    /// Requests per minute above which to flag as suspicious.
+    pub high_request_rate_threshold: u32,
 }
 
 impl Default for HttpDetectorConfig {
@@ -38,8 +40,9 @@ impl Default for HttpDetectorConfig {
         Self {
             min_requests: 5,
             payload_consistency_threshold: 0.1,
-            max_size_variance: 50.0, // bytes
-            min_post_ratio: 0.8,     // 80% POST requests
+            max_size_variance: 50.0,         // bytes
+            min_post_ratio: 0.8,             // 80% POST requests
+            high_request_rate_threshold: 30, // requests/minute
         }
     }
 }
@@ -548,8 +551,7 @@ impl HttpDetector {
         // Check request rate (high rate indicates automation)
         let request_rate = tracker.request_rate();
         let requests_per_minute = (request_rate * 60.0) as u32;
-        if requests_per_minute > 30 {
-            // More than 30 requests/minute
+        if requests_per_minute > self.config.high_request_rate_threshold {
             indicators.push(HttpIndicator::HighRequestRate {
                 rate: requests_per_minute,
             });
@@ -665,9 +667,17 @@ pub fn parse_http_request(payload: &[u8], timestamp: DateTime<Utc>) -> Option<Ht
     })
 }
 
-/// Check if a port is commonly used for HTTP traffic.
+/// Default HTTP ports.
+pub const DEFAULT_HTTP_PORTS: &[u16] = &[80, 8080, 8000, 8008, 8888, 3000, 3128, 9000];
+
+/// Check if a port is commonly used for HTTP traffic using the default port list.
 pub fn is_http_port(port: u16) -> bool {
-    matches!(port, 80 | 8080 | 8000 | 8008 | 8888 | 3000 | 3128 | 9000)
+    DEFAULT_HTTP_PORTS.contains(&port)
+}
+
+/// Check if a port is commonly used for HTTP traffic using a custom port list.
+pub fn is_http_port_in(port: u16, ports: &[u16]) -> bool {
+    ports.contains(&port)
 }
 
 #[cfg(test)]

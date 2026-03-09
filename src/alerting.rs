@@ -204,6 +204,8 @@ pub struct AlertingConfig {
     pub throttle_seconds: u64,
     /// Maximum alerts per minute (global rate limit).
     pub max_alerts_per_minute: u32,
+    /// HTTP client timeout for webhook requests (seconds).
+    pub webhook_timeout_secs: u64,
     /// Webhook destinations.
     #[serde(default)]
     pub webhooks: Vec<WebhookConfig>,
@@ -218,6 +220,7 @@ impl Default for AlertingConfig {
             enabled: false,
             throttle_seconds: 300,
             max_alerts_per_minute: 30,
+            webhook_timeout_secs: 10,
             webhooks: vec![],
             syslog: SyslogConfig::default(),
         }
@@ -248,7 +251,7 @@ impl AlertService {
     /// Creates a new alert service.
     pub fn new(config: AlertingConfig) -> Self {
         let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(config.webhook_timeout_secs))
             .build()
             .unwrap_or_default();
 
