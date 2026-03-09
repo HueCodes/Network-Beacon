@@ -60,7 +60,7 @@ pub struct DnsAnalysisResult {
 }
 
 impl DnsAnalysisResult {
-    #[allow(dead_code)] // Factory for non-suspicious results
+    #[allow(dead_code)]
     pub fn not_suspicious() -> Self {
         Self {
             is_suspicious: false,
@@ -92,14 +92,14 @@ pub enum DnsIndicator {
 #[derive(Debug, Clone)]
 pub struct DnsQuery {
     /// Full query name (e.g., "encoded-data.evil.com")
-    #[allow(dead_code)] // Available for detailed logging
+    #[allow(dead_code)]
     pub qname: String,
     /// Individual labels (e.g., ["encoded-data", "evil", "com"])
     pub labels: Vec<String>,
     /// Query type (A=1, TXT=16, NULL=10, etc.)
     pub qtype: u16,
     /// Query class (usually IN=1)
-    #[allow(dead_code)] // Available for detailed logging
+    #[allow(dead_code)]
     pub qclass: u16,
 }
 

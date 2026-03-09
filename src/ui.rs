@@ -481,11 +481,12 @@ fn format_indicators(flow: &FlowAnalysis) -> (String, Style) {
         .any(|i| i.contains("nonstandard_port"));
     let has_periodic = flow.indicators.iter().any(|i| i == "periodic_beacon");
     let has_unknown_tls = flow.indicators.iter().any(|i| i == "unknown_tls_client");
+    let has_http_beacon = flow.indicators.iter().any(|i| i == "http_beacon");
 
     // Choose color based on severity
     let style = if has_dns_tunneling || has_protocol_mismatch {
         Style::default().fg(Color::Red).bold()
-    } else if has_periodic && has_unknown_tls {
+    } else if (has_periodic && has_unknown_tls) || has_http_beacon {
         Style::default().fg(Color::Red)
     } else if has_periodic {
         Style::default().fg(Color::Yellow)
@@ -503,6 +504,9 @@ fn format_indicators(flow: &FlowAnalysis) -> (String, Style) {
     }
     if has_periodic {
         parts.push("BEACON");
+    }
+    if has_http_beacon {
+        parts.push("HTTP-BCN");
     }
     if has_unknown_tls {
         parts.push("UNK-TLS");
@@ -682,7 +686,9 @@ fn render_detail_overlay(frame: &mut Frame, flow: &FlowAnalysis) {
         detail_text.push(Line::from(vec![
             Span::styled("Country:        ", Style::default().fg(Color::Gray)),
             Span::styled(
-                geo.country_name.clone().unwrap_or_else(|| geo.country_display()),
+                geo.country_name
+                    .clone()
+                    .unwrap_or_else(|| geo.country_display()),
                 geo_style,
             ),
         ]));
@@ -800,6 +806,47 @@ fn render_detail_overlay(frame: &mut Frame, flow: &FlowAnalysis) {
             Span::styled("Query Count:    ", Style::default().fg(Color::Gray)),
             Span::raw(format!("{}", dns.query_count)),
         ]));
+    }
+
+    // Add HTTP analysis if available
+    if let Some(ref http) = flow.http_analysis {
+        detail_text.push(Line::from(""));
+        detail_text.push(Line::from(Span::styled(
+            "HTTP Beacon Analysis",
+            Style::default().bold().fg(Color::Cyan),
+        )));
+
+        let http_status_style = if http.is_suspicious {
+            Style::default().fg(Color::Red).bold()
+        } else {
+            Style::default().fg(Color::Green)
+        };
+
+        detail_text.push(Line::from(vec![
+            Span::styled("Status:         ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                if http.is_suspicious {
+                    "SUSPICIOUS"
+                } else {
+                    "Normal"
+                },
+                http_status_style,
+            ),
+        ]));
+        detail_text.push(Line::from(vec![
+            Span::styled("Request Count:  ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{}", http.request_count)),
+        ]));
+        detail_text.push(Line::from(vec![
+            Span::styled("POST Ratio:     ", Style::default().fg(Color::Gray)),
+            Span::raw(format!("{:.1}%", http.post_ratio * 100.0)),
+        ]));
+        if let Some(ref ua) = http.user_agent {
+            detail_text.push(Line::from(vec![
+                Span::styled("User-Agent:     ", Style::default().fg(Color::Gray)),
+                Span::raw(ua.clone()),
+            ]));
+        }
     }
 
     // Add indicators section

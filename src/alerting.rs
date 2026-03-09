@@ -16,19 +16,16 @@ use crate::analyzer::FlowAnalysis;
 use crate::geo::GeoInfo;
 
 /// Severity level for alerts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AlertSeverity {
     Low,
+    #[default]
     Medium,
     High,
     Critical,
-}
-
-impl Default for AlertSeverity {
-    fn default() -> Self {
-        Self::Medium
-    }
 }
 
 impl std::fmt::Display for AlertSeverity {
@@ -118,12 +115,7 @@ impl Alert {
         let (ja3_hash, ja3_match) = flow
             .tls_fingerprint
             .as_ref()
-            .map(|fp| {
-                (
-                    Some(fp.ja3_hash.clone()),
-                    fp.malicious_match.clone(),
-                )
-            })
+            .map(|fp| (Some(fp.ja3_hash.clone()), fp.malicious_match.clone()))
             .unwrap_or((None, None));
 
         Self {
@@ -296,6 +288,7 @@ impl AlertService {
     }
 
     /// Checks if alerting is enabled.
+    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.config.enabled
     }
@@ -340,7 +333,10 @@ impl AlertService {
             }
 
             if *count >= self.config.max_alerts_per_minute {
-                warn!("Global alert rate limit reached ({}/min)", self.config.max_alerts_per_minute);
+                warn!(
+                    "Global alert rate limit reached ({}/min)",
+                    self.config.max_alerts_per_minute
+                );
                 return false;
             }
 
@@ -353,12 +349,18 @@ impl AlertService {
             throttle.insert(throttle_key, Instant::now());
 
             // Clean up old entries
-            throttle.retain(|_, v| v.elapsed() < Duration::from_secs(self.config.throttle_seconds * 2));
+            throttle
+                .retain(|_, v| v.elapsed() < Duration::from_secs(self.config.throttle_seconds * 2));
         }
 
         debug!(
             "Sending alert: {} {} {}:{} -> {}:{}",
-            alert.severity, alert.detection_type, alert.source_ip, alert.dest_port, alert.dest_ip, alert.dest_port
+            alert.severity,
+            alert.detection_type,
+            alert.source_ip,
+            alert.dest_port,
+            alert.dest_ip,
+            alert.dest_port
         );
 
         // Send to webhooks
@@ -453,7 +455,12 @@ impl AlertService {
         };
 
         // Check DNS tunneling
-        let dns_severity = if flow.dns_analysis.as_ref().map(|d| d.is_suspicious).unwrap_or(false) {
+        let dns_severity = if flow
+            .dns_analysis
+            .as_ref()
+            .map(|d| d.is_suspicious)
+            .unwrap_or(false)
+        {
             AlertSeverity::High
         } else {
             AlertSeverity::Low
@@ -476,12 +483,21 @@ impl AlertService {
         }
 
         // Check for DNS tunneling
-        if flow.dns_analysis.as_ref().map(|d| d.is_suspicious).unwrap_or(false) {
+        if flow
+            .dns_analysis
+            .as_ref()
+            .map(|d| d.is_suspicious)
+            .unwrap_or(false)
+        {
             return DetectionType::DnsTunneling;
         }
 
         // Check for protocol mismatch
-        if flow.indicators.iter().any(|i| i.contains("nonstandard_port")) {
+        if flow
+            .indicators
+            .iter()
+            .any(|i| i.contains("nonstandard_port"))
+        {
             return DetectionType::ProtocolMismatch;
         }
 
@@ -511,9 +527,18 @@ mod tests {
 
     #[test]
     fn test_alert_severity_parse() {
-        assert_eq!("critical".parse::<AlertSeverity>().unwrap(), AlertSeverity::Critical);
-        assert_eq!("HIGH".parse::<AlertSeverity>().unwrap(), AlertSeverity::High);
-        assert_eq!("Medium".parse::<AlertSeverity>().unwrap(), AlertSeverity::Medium);
+        assert_eq!(
+            "critical".parse::<AlertSeverity>().unwrap(),
+            AlertSeverity::Critical
+        );
+        assert_eq!(
+            "HIGH".parse::<AlertSeverity>().unwrap(),
+            AlertSeverity::High
+        );
+        assert_eq!(
+            "Medium".parse::<AlertSeverity>().unwrap(),
+            AlertSeverity::Medium
+        );
         assert_eq!("low".parse::<AlertSeverity>().unwrap(), AlertSeverity::Low);
     }
 

@@ -15,11 +15,13 @@
 //! - Predictable URL patterns (/api/, /beacon/, base64 encoded paths)
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, trace};
 
 /// HTTP beacon detection configuration thresholds.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HttpDetectorConfig {
     /// Minimum requests to analyze for patterns.
     pub min_requests: usize,
@@ -158,6 +160,7 @@ pub static SUSPICIOUS_URL_PATTERNS: &[SuspiciousUrlPattern] = &[
 
 /// Severity level for detection indicators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Severity {
     Low,
     Medium,
@@ -180,6 +183,8 @@ impl std::fmt::Display for Severity {
 #[derive(Debug, Clone)]
 pub struct SuspiciousUserAgent {
     pub pattern: &'static str,
+    /// Human-readable description for logging and reports.
+    #[allow(dead_code)]
     pub description: &'static str,
     pub severity: Severity,
 }
@@ -188,6 +193,8 @@ pub struct SuspiciousUserAgent {
 #[derive(Debug, Clone)]
 pub struct SuspiciousUrlPattern {
     pub pattern: &'static str,
+    /// Human-readable description for logging and reports.
+    #[allow(dead_code)]
     pub description: &'static str,
     pub severity: Severity,
 }
@@ -247,7 +254,8 @@ pub struct HttpRequest {
     pub user_agent: Option<String>,
     /// Content-Length if present
     pub content_length: Option<usize>,
-    /// Host header
+    /// Host header (used for domain correlation).
+    #[allow(dead_code)]
     pub host: Option<String>,
     /// Request timestamp
     pub timestamp: DateTime<Utc>,
@@ -330,15 +338,19 @@ impl HttpFlowTracker {
             return None;
         }
 
-        let lengths: Vec<f64> = self.post_content_lengths.iter().map(|&l| l as f64).collect();
+        let lengths: Vec<f64> = self
+            .post_content_lengths
+            .iter()
+            .map(|&l| l as f64)
+            .collect();
         let mean: f64 = lengths.iter().sum::<f64>() / lengths.len() as f64;
 
         if mean == 0.0 {
             return None;
         }
 
-        let variance: f64 = lengths.iter().map(|l| (l - mean).powi(2)).sum::<f64>()
-            / lengths.len() as f64;
+        let variance: f64 =
+            lengths.iter().map(|l| (l - mean).powi(2)).sum::<f64>() / lengths.len() as f64;
         let std_dev = variance.sqrt();
 
         Some(std_dev / mean)
@@ -372,10 +384,7 @@ impl Default for HttpFlowTracker {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HttpIndicator {
     /// Suspicious User-Agent detected
-    SuspiciousUserAgent {
-        pattern: String,
-        severity: Severity,
-    },
+    SuspiciousUserAgent { pattern: String, severity: Severity },
     /// High ratio of POST requests
     HighPostRatio { ratio: u32 }, // Stored as percentage
     /// Consistent Content-Length in POST requests
@@ -384,8 +393,6 @@ pub enum HttpIndicator {
     SuspiciousUrl { pattern: String, severity: Severity },
     /// High request rate (potential automated)
     HighRequestRate { rate: u32 }, // Requests per minute
-    /// Periodic request pattern detected
-    PeriodicRequests,
 }
 
 impl std::fmt::Display for HttpIndicator {
@@ -406,9 +413,6 @@ impl std::fmt::Display for HttpIndicator {
             Self::HighRequestRate { rate } => {
                 write!(f, "High request rate ({}/min)", rate)
             }
-            Self::PeriodicRequests => {
-                write!(f, "Periodic request pattern")
-            }
         }
     }
 }
@@ -419,6 +423,7 @@ pub struct HttpAnalysisResult {
     /// Whether beacon-like behavior was detected.
     pub is_suspicious: bool,
     /// Overall severity (highest of all indicators).
+    #[allow(dead_code)]
     pub severity: Severity,
     /// Total requests analyzed.
     pub request_count: usize,
@@ -671,7 +676,8 @@ mod tests {
 
     #[test]
     fn test_parse_http_request_get() {
-        let payload = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0\r\n\r\n";
+        let payload =
+            b"GET /index.html HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0\r\n\r\n";
         let timestamp = Utc::now();
 
         let request = parse_http_request(payload, timestamp);
@@ -755,7 +761,10 @@ mod tests {
 
         let cv = tracker.content_length_cv();
         assert!(cv.is_some());
-        assert!(cv.unwrap() < 0.01, "CV should be near 0 for identical sizes");
+        assert!(
+            cv.unwrap() < 0.01,
+            "CV should be near 0 for identical sizes"
+        );
     }
 
     #[test]
@@ -778,9 +787,10 @@ mod tests {
 
         let result = detector.analyze(&tracker);
         assert!(result.is_suspicious);
-        assert!(result.indicators.iter().any(|i| {
-            matches!(i, HttpIndicator::SuspiciousUserAgent { .. })
-        }));
+        assert!(result
+            .indicators
+            .iter()
+            .any(|i| { matches!(i, HttpIndicator::SuspiciousUserAgent { .. }) }));
     }
 
     #[test]
@@ -815,7 +825,7 @@ mod tests {
         assert!(is_http_port(8080));
         assert!(is_http_port(8000));
         assert!(!is_http_port(443)); // HTTPS
-        assert!(!is_http_port(22));  // SSH
+        assert!(!is_http_port(22)); // SSH
     }
 
     #[test]

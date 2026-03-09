@@ -18,6 +18,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::dns_detector::is_dns_port;
 use crate::error::{CaptureError, Result};
+use crate::http_detector::is_http_port;
 use crate::tls_fingerprint::is_tls_port;
 
 /// Unique identifier for a network flow.
@@ -60,7 +61,7 @@ impl std::fmt::Display for FlowKey {
 pub enum Protocol {
     Tcp,
     Udp,
-    #[allow(dead_code)] // For future protocol support
+    #[allow(dead_code)]
     Other(u8),
 }
 
@@ -87,6 +88,9 @@ pub struct FlowEvent {
     /// UDP payload for DNS analysis (only captured for DNS ports).
     /// Limited to 512 bytes (standard DNS query size).
     pub dns_payload: Option<Vec<u8>>,
+    /// TCP payload for HTTP request parsing (only captured for HTTP ports).
+    /// Limited to first 2048 bytes to capture request headers.
+    pub http_payload: Option<Vec<u8>>,
 }
 
 /// Configuration for the packet capture.
@@ -350,6 +354,23 @@ impl PacketCapture {
             None
         };
 
+        // Extract HTTP payload for beacon detection (TCP on HTTP ports, non-TLS)
+        // Limit to 2048 bytes to capture request headers
+        let http_payload: Option<Vec<u8>> =
+            if protocol == Protocol::Tcp && is_http_port(dst_port) && tls_payload.is_none() {
+                tcp_payload.and_then(|p: &[u8]| {
+                    if p.len() >= 10 {
+                        let len = p.len().min(2048);
+                        trace!("Captured HTTP payload: {} bytes on port {}", len, dst_port);
+                        Some(p[..len].to_vec())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+
         // Convert pcap timestamp to chrono DateTime
         // Use saturating arithmetic to prevent overflow (tv_usec max is 999,999)
         let nanos = (ts.tv_usec as u32).saturating_mul(1000);
@@ -372,6 +393,7 @@ impl PacketCapture {
             packet_size: data.len() as u32,
             tls_payload,
             dns_payload,
+            http_payload,
         })
     }
 }

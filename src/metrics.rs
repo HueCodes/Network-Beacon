@@ -77,11 +77,13 @@ impl Metrics {
     }
 
     /// Increment packets captured counter.
+    #[allow(dead_code)]
     pub fn inc_packets(&self) {
         self.packets_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Increment packets by a specific amount.
+    #[allow(dead_code)]
     pub fn add_packets(&self, count: u64) {
         self.packets_total.fetch_add(count, Ordering::Relaxed);
     }
@@ -101,8 +103,10 @@ impl Metrics {
             .store(report.suspicious_flows.len() as u64, Ordering::Relaxed);
         self.events_processed
             .store(report.events_processed, Ordering::Relaxed);
-        self.last_analysis_timestamp
-            .store(report.timestamp.timestamp_millis() as u64, Ordering::Relaxed);
+        self.last_analysis_timestamp.store(
+            report.timestamp.timestamp_millis() as u64,
+            Ordering::Relaxed,
+        );
 
         // Count specific detection types
         let mut dns_count: u64 = 0;
@@ -232,8 +236,7 @@ impl Metrics {
         ));
 
         // Periodic beacon detections
-        output
-            .push_str("# HELP network_beacon_periodic_detections CV-based periodic detections\n");
+        output.push_str("# HELP network_beacon_periodic_detections CV-based periodic detections\n");
         output.push_str("# TYPE network_beacon_periodic_detections gauge\n");
         output.push_str(&format!(
             "network_beacon_periodic_detections {}\n\n",
@@ -330,11 +333,8 @@ pub async fn run_metrics_server(
         }
 
         // Accept connections with timeout to allow shutdown checks
-        let accept_result = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            listener.accept(),
-        )
-        .await;
+        let accept_result =
+            tokio::time::timeout(std::time::Duration::from_secs(1), listener.accept()).await;
 
         let (mut socket, addr) = match accept_result {
             Ok(Ok((socket, addr))) => (socket, addr),
@@ -370,8 +370,7 @@ pub async fn run_metrics_server(
 
         // Simple HTTP request parsing
         let is_metrics_request = request.starts_with("GET ")
-            && (request.contains(&config.metrics_path)
-                || request.contains("/metrics"));
+            && (request.contains(&config.metrics_path) || request.contains("/metrics"));
 
         let response = if is_metrics_request {
             let body = metrics.to_prometheus_format();
@@ -484,10 +483,8 @@ mod tests {
                 tls_fingerprint: None,
                 tls_status: TlsStatus::Plaintext,
                 dns_analysis: None,
-                indicators: vec![
-                    "periodic_beacon".to_string(),
-                    "dns_tunneling".to_string(),
-                ],
+                http_analysis: None,
+                indicators: vec!["periodic_beacon".to_string(), "dns_tunneling".to_string()],
                 geo_info: None,
             }],
             events_processed: 10000,
@@ -503,10 +500,7 @@ mod tests {
             metrics.periodic_beacon_detections.load(Ordering::Relaxed),
             1
         );
-        assert_eq!(
-            metrics.dns_tunneling_detections.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(metrics.dns_tunneling_detections.load(Ordering::Relaxed), 1);
     }
 
     #[test]

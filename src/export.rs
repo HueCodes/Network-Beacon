@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::analyzer::{AnalysisReport, FlowAnalysis, FlowClassification};
 use crate::dns_detector::DnsAnalysisResult;
 use crate::geo::GeoInfo;
+use crate::http_detector::HttpAnalysisResult;
 
 /// Output format for exports
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -90,6 +91,8 @@ pub struct JsonFlow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dns_analysis: Option<JsonDnsAnalysis>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_analysis: Option<JsonHttpAnalysis>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub geo_info: Option<JsonGeoInfo>,
     pub indicators: Vec<String>,
 }
@@ -119,6 +122,7 @@ impl From<&FlowAnalysis> for JsonFlow {
                 known_match: fp.known_match.clone(),
             }),
             dns_analysis: flow.dns_analysis.as_ref().map(JsonDnsAnalysis::from),
+            http_analysis: flow.http_analysis.as_ref().map(JsonHttpAnalysis::from),
             geo_info: flow.geo_info.as_ref().map(JsonGeoInfo::from),
             indicators: flow.indicators.clone(),
         }
@@ -159,6 +163,34 @@ impl From<&DnsAnalysisResult> for JsonDnsAnalysis {
             query_rate: dns.query_rate,
             query_count: dns.query_count,
             indicators: dns.indicators.iter().map(|i| format!("{:?}", i)).collect(),
+        }
+    }
+}
+
+/// JSON-serializable HTTP analysis result
+#[derive(Serialize)]
+pub struct JsonHttpAnalysis {
+    pub is_suspicious: bool,
+    pub request_count: usize,
+    pub post_ratio: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_length_cv: Option<f64>,
+    pub request_rate: f64,
+    pub indicators: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+}
+
+impl From<&HttpAnalysisResult> for JsonHttpAnalysis {
+    fn from(http: &HttpAnalysisResult) -> Self {
+        Self {
+            is_suspicious: http.is_suspicious,
+            request_count: http.request_count,
+            post_ratio: http.post_ratio,
+            content_length_cv: http.content_length_cv,
+            request_rate: http.request_rate,
+            indicators: http.indicators.iter().map(|i| format!("{}", i)).collect(),
+            user_agent: http.user_agent.clone(),
         }
     }
 }
@@ -254,7 +286,9 @@ pub fn export_text(report: &AnalysisReport) -> String {
         output.push('\n');
 
         for flow in &report.suspicious_flows {
-            let geo_str = flow.geo_info.as_ref()
+            let geo_str = flow
+                .geo_info
+                .as_ref()
                 .map(|g| g.country_display())
                 .unwrap_or_else(|| "--".to_string());
 
@@ -286,14 +320,14 @@ fn format_interval(ms: Option<f64>) -> String {
 }
 
 /// Exports a single flow as JSON (for streaming output)
-#[allow(dead_code)] // Available for streaming JSON output
+#[allow(dead_code)]
 pub fn export_flow_json(flow: &FlowAnalysis) -> String {
     let json_flow = JsonFlow::from(flow);
     serde_json::to_string(&json_flow).unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
 }
 
 /// Creates a detection event for SIEM integration
-#[allow(dead_code)] // Available for SIEM integration
+#[allow(dead_code)]
 #[derive(Serialize)]
 pub struct DetectionEvent {
     pub event_type: &'static str,
@@ -310,7 +344,7 @@ pub struct DetectionEvent {
 }
 
 impl DetectionEvent {
-    #[allow(dead_code)] // Available for SIEM integration
+    #[allow(dead_code)]
     pub fn from_flow(flow: &FlowAnalysis, timestamp: DateTime<Utc>) -> Self {
         // Calculate confidence based on indicators
         let base_confidence = match flow.classification {
@@ -376,7 +410,7 @@ impl DetectionEvent {
         }
     }
 
-    #[allow(dead_code)] // Available for SIEM integration
+    #[allow(dead_code)]
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
     }

@@ -13,21 +13,16 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, trace, warn};
 
 /// Risk level for geographic destinations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GeoRisk {
     /// No elevated risk.
+    #[default]
     None,
     /// Elevated risk (suspicious ASN or nearby high-risk country).
     Elevated,
     /// High risk (high-risk country or known bulletproof hosting).
     High,
-}
-
-impl Default for GeoRisk {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl std::fmt::Display for GeoRisk {
@@ -64,6 +59,7 @@ impl GeoInfo {
     }
 
     /// Returns a display string for the ASN.
+    #[allow(dead_code)]
     pub fn asn_display(&self) -> String {
         match (&self.asn, &self.asn_org) {
             (Some(asn), Some(org)) => format!("AS{} ({})", asn, truncate_org(org, 20)),
@@ -74,6 +70,7 @@ impl GeoInfo {
 }
 
 /// Truncates an organization name for display.
+#[allow(dead_code)]
 fn truncate_org(org: &str, max_len: usize) -> String {
     if org.len() <= max_len {
         org.to_string()
@@ -143,8 +140,10 @@ impl GeoLookup {
             };
         }
 
-        let country_reader = config.geoip_db.as_ref().and_then(|path| {
-            match Reader::open_readfile(Path::new(path)) {
+        let country_reader = config
+            .geoip_db
+            .as_ref()
+            .and_then(|path| match Reader::open_readfile(Path::new(path)) {
                 Ok(reader) => {
                     debug!("Loaded GeoIP country database from {}", path);
                     Some(reader)
@@ -153,21 +152,22 @@ impl GeoLookup {
                     warn!("Failed to load GeoIP country database {}: {}", path, e);
                     None
                 }
-            }
-        });
+            });
 
-        let asn_reader = config.asn_db.as_ref().and_then(|path| {
-            match Reader::open_readfile(Path::new(path)) {
-                Ok(reader) => {
-                    debug!("Loaded GeoIP ASN database from {}", path);
-                    Some(reader)
-                }
-                Err(e) => {
-                    warn!("Failed to load GeoIP ASN database {}: {}", path, e);
-                    None
-                }
-            }
-        });
+        let asn_reader =
+            config
+                .asn_db
+                .as_ref()
+                .and_then(|path| match Reader::open_readfile(Path::new(path)) {
+                    Ok(reader) => {
+                        debug!("Loaded GeoIP ASN database from {}", path);
+                        Some(reader)
+                    }
+                    Err(e) => {
+                        warn!("Failed to load GeoIP ASN database {}: {}", path, e);
+                        None
+                    }
+                });
 
         let high_risk_countries: HashSet<String> = config
             .high_risk_countries
@@ -175,8 +175,7 @@ impl GeoLookup {
             .map(|s| s.to_uppercase())
             .collect();
 
-        let suspicious_asns: HashSet<u32> =
-            config.suspicious_asns.iter().map(|a| a.asn).collect();
+        let suspicious_asns: HashSet<u32> = config.suspicious_asns.iter().map(|a| a.asn).collect();
 
         Self {
             country_reader,

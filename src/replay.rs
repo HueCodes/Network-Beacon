@@ -16,7 +16,7 @@ use tracing::{debug, info, trace};
 
 use crate::capture::{FlowEvent, FlowKey, Protocol};
 use crate::dns_detector::is_dns_port;
-// Note: is_tls_port removed since we now extract TLS from all TCP ports
+use crate::http_detector::is_http_port;
 
 /// Configuration for PCAP replay
 #[derive(Debug, Clone)]
@@ -71,7 +71,7 @@ impl PcapReplay {
     }
 
     /// Replays the PCAP file synchronously, sending events to the provided sender.
-    #[allow(dead_code)] // Alternative API for custom replay handling
+    #[allow(dead_code)]
     pub async fn replay_to_sender(self, tx: mpsc::Sender<FlowEvent>) -> Result<ReplayStats> {
         replay_file(&self.file_path, tx, self.config).await
     }
@@ -272,6 +272,21 @@ fn parse_pcap_packet(data: &[u8], timestamp: DateTime<Utc>) -> Option<FlowEvent>
         None
     };
 
+    // Extract HTTP payload
+    let http_payload: Option<Vec<u8>> =
+        if protocol == Protocol::Tcp && is_http_port(dst_port) && tls_payload.is_none() {
+            tcp_payload.and_then(|p| {
+                if p.len() >= 10 {
+                    let len = p.len().min(2048);
+                    Some(p[..len].to_vec())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
     let flow_key = FlowKey::new(src_ip, dst_ip, dst_port, protocol);
 
     Some(FlowEvent {
@@ -280,6 +295,7 @@ fn parse_pcap_packet(data: &[u8], timestamp: DateTime<Utc>) -> Option<FlowEvent>
         packet_size: data.len() as u32,
         tls_payload,
         dns_payload,
+        http_payload,
     })
 }
 

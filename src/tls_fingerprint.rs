@@ -152,7 +152,7 @@ pub static KNOWN_GOOD_FINGERPRINTS: &[KnownFingerprint] = &[
 pub struct KnownFingerprint {
     pub fingerprint: &'static str,
     pub description: &'static str,
-    #[allow(dead_code)] // Available for detailed logging
+    #[allow(dead_code)]
     pub vendor: &'static str,
 }
 
@@ -187,7 +187,7 @@ pub struct TlsFingerprint {
 
 impl TlsFingerprint {
     /// Checks if this fingerprint is suspicious when combined with high periodicity.
-    #[allow(dead_code)] // Available for custom detection logic
+    #[allow(dead_code)]
     pub fn is_suspicious(&self, is_periodic: bool) -> bool {
         !self.is_known_good && is_periodic
     }
@@ -318,12 +318,11 @@ pub fn extract_fingerprint(payload: &[u8]) -> Option<TlsFingerprint> {
 
                         // Extract elliptic curves (supported groups) for JA3
                         if let TlsExtension::EllipticCurves(ref curves) = ext {
-                            client_hello.elliptic_curves =
-                                curves.iter().map(|c| c.0).collect();
+                            client_hello.elliptic_curves = curves.iter().map(|c| c.0).collect();
                         }
 
                         // Extract EC point formats for JA3
-                        if let TlsExtension::EcPointFormats(ref formats) = ext {
+                        if let TlsExtension::EcPointFormats(formats) = ext {
                             client_hello.ec_point_formats = formats.to_vec();
                         }
                     }
@@ -605,7 +604,7 @@ pub enum TlsStatus {
     /// Not a TLS port - plaintext traffic.
     Plaintext,
     /// Unknown protocol on unusual port.
-    #[allow(dead_code)] // For future protocol classification
+    #[allow(dead_code)]
     Unknown,
 }
 
@@ -761,7 +760,8 @@ mod tests {
         let curves = vec![23, 24];
         let formats = vec![0, 1];
 
-        let (ja3_string, ja3_hash) = generate_ja3(version, &ciphers, &extensions, &curves, &formats);
+        let (ja3_string, ja3_hash) =
+            generate_ja3(version, &ciphers, &extensions, &curves, &formats);
 
         // JA3 string format: version,ciphers,extensions,curves,formats
         let parts: Vec<&str> = ja3_string.split(',').collect();
@@ -787,10 +787,20 @@ mod tests {
         let curves = vec![23];
         let formats = vec![0];
 
-        let (str_with_grease, _) =
-            generate_ja3(version, &ciphers_with_grease, &extensions, &curves, &formats);
-        let (str_without_grease, _) =
-            generate_ja3(version, &ciphers_without_grease, &extensions, &curves, &formats);
+        let (str_with_grease, _) = generate_ja3(
+            version,
+            &ciphers_with_grease,
+            &extensions,
+            &curves,
+            &formats,
+        );
+        let (str_without_grease, _) = generate_ja3(
+            version,
+            &ciphers_without_grease,
+            &extensions,
+            &curves,
+            &formats,
+        );
 
         // GREASE values should be filtered out, so both should produce same result
         assert_eq!(
@@ -829,7 +839,9 @@ mod tests {
 
         assert!(is_malicious, "Known Cobalt Strike JA3 should be detected");
         assert!(
-            desc.as_ref().map(|d| d.contains("Cobalt Strike")).unwrap_or(false),
+            desc.as_ref()
+                .map(|d| d.contains("Cobalt Strike"))
+                .unwrap_or(false),
             "Description should mention Cobalt Strike"
         );
         assert_eq!(category, Some(ThreatCategory::C2Framework));
@@ -855,7 +867,8 @@ mod tests {
         let curves: Vec<u16> = vec![];
         let formats: Vec<u8> = vec![];
 
-        let (ja3_string, ja3_hash) = generate_ja3(version, &ciphers, &extensions, &curves, &formats);
+        let (ja3_string, ja3_hash) =
+            generate_ja3(version, &ciphers, &extensions, &curves, &formats);
 
         // Should still generate valid format with empty sections
         assert!(ja3_string.starts_with("771,"));

@@ -41,12 +41,13 @@ use tokio::sync::mpsc;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use crate::alerting::new_shared_alert_service;
-use crate::analyzer::{run_analyzer, AnalyzerConfig};
+use crate::alerting::{new_shared_alert_service, Alert, AlertService, SharedAlertService};
+use crate::analyzer::{run_analyzer, AnalysisReport, AnalyzerConfig};
 use crate::capture::{list_devices, CaptureConfig, PacketCapture};
 use crate::config::Config;
 use crate::export::{export_report, OutputFormat};
 use crate::geo::new_shared_geo_lookup;
+use crate::metrics::{new_shared_metrics, run_metrics_server, MetricsServerConfig, SharedMetrics};
 use crate::replay::{PcapReplay, ReplayConfig};
 use crate::ui::run_ui;
 
@@ -348,13 +349,38 @@ async fn run_capture(
         None
     };
 
-    // Create alerting service (for future use with real-time alerts)
-    let _alert_service = if config.alerting.enabled {
+    // Create alerting service
+    let alert_service = if config.alerting.enabled {
         info!(
             "Alerting enabled: {} webhooks configured",
             config.alerting.webhooks.len()
         );
         Some(new_shared_alert_service(config.alerting.clone()))
+    } else {
+        None
+    };
+
+    // Create metrics
+    let metrics = new_shared_metrics();
+
+    // Start metrics server if configured
+    let metrics_bind = std::env::var("NETWORK_BEACON_METRICS_BIND")
+        .unwrap_or_else(|_| config.metrics.bind_address.clone());
+    let metrics_shutdown = std::sync::Arc::new(tokio::sync::RwLock::new(false));
+    let metrics_handle = if config.metrics.enabled {
+        let metrics_config = MetricsServerConfig {
+            bind_address: metrics_bind
+                .parse()
+                .unwrap_or_else(|_| "127.0.0.1:9090".parse().unwrap()),
+            metrics_path: config.metrics.metrics_path.clone(),
+        };
+        let m = metrics.clone();
+        let shutdown = metrics_shutdown.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = run_metrics_server(metrics_config, m, shutdown).await {
+                error!("Metrics server error: {}", e);
+            }
+        }))
     } else {
         None
     };
@@ -379,7 +405,14 @@ async fn run_capture(
 
     // Run UI or console output
     if no_ui {
-        run_console_output(report_rx, shutdown_handle.clone(), output_format).await?;
+        run_console_output(
+            report_rx,
+            shutdown_handle.clone(),
+            output_format,
+            metrics.clone(),
+            alert_service.clone(),
+        )
+        .await?;
     } else {
         // Run TUI - this blocks until user quits
         run_ui(report_rx).await?;
@@ -387,10 +420,17 @@ async fn run_capture(
 
     // Signal shutdown
     shutdown_handle.store(true, Ordering::Relaxed);
+    {
+        let mut shutdown = metrics_shutdown.write().await;
+        *shutdown = true;
+    }
     info!("Shutdown signal sent");
 
     // Wait for analyzer to finish
     let _ = analyzer_handle.await;
+    if let Some(handle) = metrics_handle {
+        let _ = handle.await;
+    }
 
     info!("Network-Beacon stopped");
     Ok(())
@@ -455,9 +495,11 @@ async fn run_replay(
 }
 
 async fn run_console_output(
-    mut report_rx: mpsc::Receiver<analyzer::AnalysisReport>,
+    mut report_rx: mpsc::Receiver<AnalysisReport>,
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     output_format: OutputFormat,
+    metrics: SharedMetrics,
+    alert_service: Option<SharedAlertService>,
 ) -> Result<()> {
     use tokio::signal;
 
@@ -469,6 +511,14 @@ async fn run_console_output(
     loop {
         tokio::select! {
             Some(report) = report_rx.recv() => {
+                // Update metrics
+                metrics.update_from_report(&report);
+
+                // Send alerts for suspicious flows
+                if let Some(ref alert_svc) = alert_service {
+                    process_alerts(alert_svc, &report, &metrics).await;
+                }
+
                 println!("{}", export_report(&report, output_format));
             }
 
@@ -483,6 +533,21 @@ async fn run_console_output(
     }
 
     Ok(())
+}
+
+async fn process_alerts(
+    alert_service: &SharedAlertService,
+    report: &AnalysisReport,
+    metrics: &SharedMetrics,
+) {
+    for flow in &report.suspicious_flows {
+        let detection_type = AlertService::determine_detection_type(flow);
+        let severity = AlertService::determine_severity(flow, flow.geo_info.as_ref());
+        let alert = Alert::from_flow(flow, detection_type, severity, flow.geo_info.as_ref());
+        if alert_service.send_alert(alert).await {
+            metrics.inc_alerts();
+        }
+    }
 }
 
 async fn run_offline_analysis(

@@ -37,6 +37,10 @@ use crate::dns_detector::{
 };
 use crate::error::Result;
 use crate::geo::{GeoInfo, SharedGeoLookup};
+use crate::http_detector::{
+    is_http_port, parse_http_request, HttpAnalysisResult, HttpDetector, HttpDetectorConfig,
+    HttpFlowTracker,
+};
 use crate::tls_fingerprint::{extract_fingerprint, is_tls_port, TlsFingerprint, TlsStatus};
 
 /// Classification of flow behavior based on CV analysis.
@@ -91,12 +95,12 @@ impl std::fmt::Display for FlowClassification {
 
 /// Trait for beacon detection algorithms.
 /// Allows for extensibility with different detection strategies.
-#[allow(dead_code)] // Trait interface for extensibility
 pub trait Detector: Send + Sync {
     /// Analyzes a series of intervals and returns a detection result.
     fn analyze(&self, intervals_ms: &[f64]) -> DetectionResult;
 
     /// Returns the minimum number of samples required for analysis.
+    #[allow(dead_code)]
     fn min_samples(&self) -> usize;
 }
 
@@ -106,9 +110,9 @@ pub struct DetectionResult {
     pub classification: FlowClassification,
     pub cv: Option<f64>,
     pub mean_interval_ms: Option<f64>,
-    #[allow(dead_code)] // Available for detailed reporting
+    #[allow(dead_code)]
     pub std_dev_ms: Option<f64>,
-    #[allow(dead_code)] // Available for detailed reporting
+    #[allow(dead_code)]
     pub sample_count: usize,
 }
 
@@ -170,11 +174,11 @@ pub struct IntervalStatistics {
     pub mean: f64,
     pub std_dev: f64,
     pub cv: f64,
-    #[allow(dead_code)] // Available for extended statistics output
+    #[allow(dead_code)]
     pub min: f64,
-    #[allow(dead_code)] // Available for extended statistics output
+    #[allow(dead_code)]
     pub max: f64,
-    #[allow(dead_code)] // Available for extended statistics output
+    #[allow(dead_code)]
     pub median: f64,
 }
 
@@ -257,6 +261,10 @@ pub struct FlowData {
     pub dns_tracker: Option<DnsFlowTracker>,
     /// Latest DNS analysis result.
     pub dns_analysis: Option<DnsAnalysisResult>,
+    /// HTTP flow tracker for beacon detection (if HTTP flow).
+    pub http_tracker: Option<HttpFlowTracker>,
+    /// Latest HTTP analysis result.
+    pub http_analysis: Option<HttpAnalysisResult>,
 }
 
 impl FlowData {
@@ -266,6 +274,9 @@ impl FlowData {
 
         // Initialize DNS tracker if this is a DNS flow
         let dns_tracker = Self::init_dns_tracker(event);
+
+        // Initialize HTTP tracker if this is an HTTP flow
+        let http_tracker = Self::init_http_tracker(event);
 
         Self {
             flow_key: event.flow_key.clone(),
@@ -279,6 +290,8 @@ impl FlowData {
             tls_status,
             dns_tracker,
             dns_analysis: None,
+            http_tracker,
+            http_analysis: None,
         }
     }
 
@@ -293,6 +306,23 @@ impl FlowData {
         if let Some(ref payload) = event.dns_payload {
             if let Some(query) = parse_dns_query(payload) {
                 tracker.add_query(&query, event.timestamp);
+            }
+        }
+
+        Some(tracker)
+    }
+
+    /// Initializes HTTP tracker if this is an HTTP flow with payload
+    fn init_http_tracker(event: &FlowEvent) -> Option<HttpFlowTracker> {
+        if event.flow_key.protocol != Protocol::Tcp || !is_http_port(event.flow_key.dst_port) {
+            return None;
+        }
+
+        let mut tracker = HttpFlowTracker::new();
+
+        if let Some(ref payload) = event.http_payload {
+            if let Some(request) = parse_http_request(payload, event.timestamp) {
+                tracker.add_request(request);
             }
         }
 
@@ -358,6 +388,15 @@ impl FlowData {
             if let Some(ref payload) = event.dns_payload {
                 if let Some(query) = parse_dns_query(payload) {
                     tracker.add_query(&query, event.timestamp);
+                }
+            }
+        }
+
+        // Update HTTP tracker if this is an HTTP flow
+        if let Some(ref mut tracker) = self.http_tracker {
+            if let Some(ref payload) = event.http_payload {
+                if let Some(request) = parse_http_request(payload, event.timestamp) {
+                    tracker.add_request(request);
                 }
             }
         }
@@ -435,6 +474,8 @@ pub struct FlowAnalysis {
     pub tls_status: TlsStatus,
     /// DNS tunneling analysis result (if DNS flow).
     pub dns_analysis: Option<DnsAnalysisResult>,
+    /// HTTP beacon analysis result (if HTTP flow).
+    pub http_analysis: Option<HttpAnalysisResult>,
     /// Detection indicators for this flow.
     pub indicators: Vec<String>,
     /// Geographic information for destination IP.
@@ -447,6 +488,7 @@ pub struct FlowAnalyzer {
     flows: LruCache<FlowKey, FlowData>,
     detector: Box<dyn Detector>,
     dns_detector: DnsDetector,
+    http_detector: HttpDetector,
     events_processed: u64,
     geo_lookup: Option<SharedGeoLookup>,
 }
@@ -455,6 +497,7 @@ impl FlowAnalyzer {
     pub fn new(config: AnalyzerConfig) -> Self {
         let detector = Box::new(CvDetector::new(config.min_samples));
         let dns_detector = DnsDetector::new(DnsDetectorConfig::default());
+        let http_detector = HttpDetector::new(HttpDetectorConfig::default());
         // Ensure max_flows is at least 1 to prevent panic
         let max_flows = std::num::NonZeroUsize::new(config.max_flows.max(1))
             .expect("max(1) guarantees non-zero");
@@ -464,6 +507,7 @@ impl FlowAnalyzer {
             flows: LruCache::new(max_flows),
             detector,
             dns_detector,
+            http_detector,
             events_processed: 0,
             geo_lookup: None,
         }
@@ -526,6 +570,15 @@ impl FlowAnalyzer {
                     None
                 };
 
+                // Perform HTTP beacon analysis if applicable
+                let http_analysis = if let Some(ref tracker) = flow_data.http_tracker {
+                    let analysis = self.http_detector.analyze(tracker);
+                    flow_data.http_analysis = Some(analysis.clone());
+                    Some(analysis)
+                } else {
+                    None
+                };
+
                 // Build indicators list
                 let mut indicators = Vec::new();
 
@@ -576,6 +629,20 @@ impl FlowAnalyzer {
                     }
                 }
 
+                // HTTP beacon indicators
+                let http_suspicious = http_analysis
+                    .as_ref()
+                    .map(|h| h.is_suspicious)
+                    .unwrap_or(false);
+                if http_suspicious {
+                    indicators.push("http_beacon".to_string());
+                    if let Some(ref http) = http_analysis {
+                        for indicator in &http.indicators {
+                            indicators.push(format!("{}", indicator));
+                        }
+                    }
+                }
+
                 // Protocol mismatch detection
                 let mut protocol_mismatch = false;
 
@@ -593,9 +660,10 @@ impl FlowAnalyzer {
                 }
 
                 // Perform GeoIP lookup for destination
-                let geo_info = self.geo_lookup.as_ref().map(|geo| {
-                    geo.lookup(flow_data.flow_key.dst_ip)
-                });
+                let geo_info = self
+                    .geo_lookup
+                    .as_ref()
+                    .map(|geo| geo.lookup(flow_data.flow_key.dst_ip));
 
                 // Check for high-risk geo destination
                 let geo_high_risk = geo_info
@@ -607,8 +675,13 @@ impl FlowAnalyzer {
                     indicators.push("high_risk_geo".to_string());
                 }
 
-                // Report suspicious flows (periodic OR DNS tunneling OR protocol mismatch OR high-risk geo)
-                if is_periodic || dns_suspicious || protocol_mismatch || geo_high_risk {
+                // Report suspicious flows
+                if is_periodic
+                    || dns_suspicious
+                    || http_suspicious
+                    || protocol_mismatch
+                    || geo_high_risk
+                {
                     suspicious_flows.push(FlowAnalysis {
                         flow_key: flow_data.flow_key.clone(),
                         classification: result.classification,
@@ -620,6 +693,7 @@ impl FlowAnalyzer {
                         tls_fingerprint: flow_data.tls_fingerprint.clone(),
                         tls_status: flow_data.tls_status,
                         dns_analysis,
+                        http_analysis,
                         indicators,
                         geo_info,
                     });
@@ -670,7 +744,7 @@ impl FlowAnalyzer {
     }
 
     /// Returns current statistics.
-    #[allow(dead_code)] // Available for monitoring/debugging
+    #[allow(dead_code)]
     pub fn stats(&self) -> AnalyzerStats {
         AnalyzerStats {
             total_flows: self.flows.len(),
@@ -681,8 +755,8 @@ impl FlowAnalyzer {
 }
 
 /// Runtime statistics for the analyzer.
-#[allow(dead_code)] // Available for monitoring/debugging
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AnalyzerStats {
     pub total_flows: usize,
     pub events_processed: u64,

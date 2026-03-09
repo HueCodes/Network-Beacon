@@ -22,6 +22,7 @@ pub struct Config {
     pub output: OutputConfig,
     pub geo: GeoConfig,
     pub alerting: AlertingConfig,
+    pub metrics: MetricsConfig,
 }
 
 impl Config {
@@ -179,7 +180,7 @@ pub enum DetectionProfile {
 
 impl DetectionProfile {
     /// Returns adjusted thresholds based on profile
-    #[allow(dead_code)] // For future config-based threshold adjustment
+    #[allow(dead_code)]
     pub fn adjust_cv_threshold(&self, base: f64) -> f64 {
         match self {
             Self::Paranoid => base * 1.5, // More lenient = more detections
@@ -189,7 +190,7 @@ impl DetectionProfile {
     }
 
     /// Returns adjusted min_samples based on profile
-    #[allow(dead_code)] // For future config-based threshold adjustment
+    #[allow(dead_code)]
     pub fn adjust_min_samples(&self, base: usize) -> usize {
         match self {
             Self::Paranoid => base.saturating_sub(2).max(2),
@@ -228,6 +229,28 @@ impl Default for OutputConfig {
             format: OutputFormat::Text,
             file: None,
             verbose: false,
+        }
+    }
+}
+
+/// Prometheus metrics configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MetricsConfig {
+    /// Enable Prometheus metrics endpoint.
+    pub enabled: bool,
+    /// Bind address for the metrics HTTP server.
+    pub bind_address: String,
+    /// Metrics endpoint path.
+    pub metrics_path: String,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: "127.0.0.1:9090".to_string(),
+            metrics_path: "/metrics".to_string(),
         }
     }
 }

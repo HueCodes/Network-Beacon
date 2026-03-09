@@ -25,37 +25,16 @@ pub enum CaptureError {
     #[error("Failed to read packet: {0}")]
     PacketRead(#[from] pcap::Error),
 
-    #[allow(dead_code)] // For future async channel handling
+    #[allow(dead_code)]
     #[error("Channel closed unexpectedly")]
     ChannelClosed,
 
     #[error("No suitable capture device found")]
     NoDeviceFound,
-}
 
-/// Errors that can occur during flow analysis.
-#[allow(dead_code)] // Defined for future typed error handling
-#[derive(Error, Debug)]
-pub enum AnalyzerError {
-    #[error("Insufficient data points for analysis (need at least {required}, got {actual})")]
-    InsufficientData { required: usize, actual: usize },
-
-    #[error("Statistical calculation failed: {0}")]
-    StatisticalError(String),
-
-    #[error("Flow not found: {0}")]
-    FlowNotFound(String),
-}
-
-/// Errors that can occur in the TUI layer.
-#[allow(dead_code)] // Defined for future typed error handling
-#[derive(Error, Debug)]
-pub enum UiError {
-    #[error("Terminal initialization failed: {0}")]
-    TerminalInit(#[from] std::io::Error),
-
-    #[error("Failed to render frame: {0}")]
-    RenderError(String),
+    #[allow(dead_code)]
+    #[error("PCAP file not found: {0}")]
+    FileNotFound(String),
 }
 
 /// Result type alias using anyhow for application-level error handling.
