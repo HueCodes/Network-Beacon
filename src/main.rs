@@ -186,6 +186,17 @@ enum Commands {
         #[arg(long)]
         stdout: bool,
     },
+
+    /// Run a synthetic benchmark to measure analysis throughput.
+    Benchmark {
+        /// Number of synthetic flows to generate.
+        #[arg(long, default_value = "1000")]
+        flows: usize,
+
+        /// Number of events per flow.
+        #[arg(long, default_value = "100")]
+        events_per_flow: usize,
+    },
 }
 
 #[tokio::main]
@@ -299,6 +310,11 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+
+        Commands::Benchmark {
+            flows,
+            events_per_flow,
+        } => run_benchmark(flows, events_per_flow),
     }
 }
 
@@ -734,4 +750,91 @@ fn env_override_usize(var: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// Runs a synthetic benchmark measuring analysis throughput.
+fn run_benchmark(num_flows: usize, events_per_flow: usize) -> Result<()> {
+    use crate::analyzer::{AnalyzerConfig, FlowAnalyzer};
+    use crate::capture::{FlowEvent, FlowKey, Protocol};
+    use chrono::Utc;
+    use std::net::IpAddr;
+
+    let total_events = num_flows * events_per_flow;
+    println!("Network-Beacon Benchmark");
+    println!("========================");
+    println!(
+        "Flows: {}, Events/flow: {}, Total events: {}",
+        num_flows, events_per_flow, total_events
+    );
+    println!();
+
+    let config = AnalyzerConfig::default();
+    let detection_config = crate::config::DetectionConfig::default();
+    let mut analyzer = FlowAnalyzer::new(config, detection_config);
+
+    // Generate synthetic events
+    let base_time = Utc::now();
+    let events: Vec<FlowEvent> = (0..num_flows)
+        .flat_map(|flow_idx| {
+            let src_ip: IpAddr = format!("10.0.{}.{}", flow_idx / 256, flow_idx % 256)
+                .parse()
+                .unwrap_or_else(|_| "10.0.0.1".parse().unwrap());
+            let dst_ip: IpAddr = format!("192.168.{}.{}", flow_idx / 256, flow_idx % 256)
+                .parse()
+                .unwrap_or_else(|_| "192.168.0.1".parse().unwrap());
+            let flow_key = FlowKey::new(src_ip, dst_ip, 443, Protocol::Tcp);
+
+            (0..events_per_flow).map(move |evt_idx| FlowEvent {
+                flow_key: flow_key.clone(),
+                timestamp: base_time + chrono::Duration::seconds(evt_idx as i64),
+                packet_size: 256,
+                tls_payload: None,
+                dns_payload: None,
+                http_payload: None,
+            })
+        })
+        .collect();
+
+    // Phase 1: Event ingestion
+    let ingest_start = std::time::Instant::now();
+    for event in events {
+        analyzer.process_event(event);
+    }
+    let ingest_elapsed = ingest_start.elapsed();
+
+    // Phase 2: Analysis
+    let analysis_start = std::time::Instant::now();
+    let report = analyzer.analyze_all();
+    let analysis_elapsed = analysis_start.elapsed();
+
+    let total_elapsed = ingest_elapsed + analysis_elapsed;
+
+    println!("Event ingestion:");
+    println!(
+        "  {} events in {:.2}ms ({:.0} events/sec)",
+        total_events,
+        ingest_elapsed.as_secs_f64() * 1000.0,
+        total_events as f64 / ingest_elapsed.as_secs_f64()
+    );
+    println!();
+    println!("Analysis cycle:");
+    println!(
+        "  {} flows analyzed in {:.2}ms ({:.0} flows/sec)",
+        report.active_flows,
+        analysis_elapsed.as_secs_f64() * 1000.0,
+        report.active_flows as f64 / analysis_elapsed.as_secs_f64()
+    );
+    println!(
+        "  {} suspicious flows detected",
+        report.suspicious_flows.len()
+    );
+    println!();
+    println!("Total:");
+    println!(
+        "  {:.2}ms ({:.0} events/sec throughput)",
+        total_elapsed.as_secs_f64() * 1000.0,
+        total_events as f64 / total_elapsed.as_secs_f64()
+    );
+
+    Ok(())
 }

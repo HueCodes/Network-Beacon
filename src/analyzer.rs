@@ -548,6 +548,7 @@ impl FlowAnalyzer {
     }
 
     /// Performs analysis on all active flows.
+    #[tracing::instrument(skip(self), fields(flow_count = self.flows.len()))]
     pub fn analyze_all(&mut self) -> AnalysisReport {
         let now = Utc::now();
         let ttl = chrono::Duration::seconds(self.config.flow_ttl_secs as i64);
@@ -745,6 +746,7 @@ impl FlowAnalyzer {
     }
 
     /// Removes expired flows from the cache.
+    #[tracing::instrument(skip(self), fields(flow_count = self.flows.len()))]
     pub fn cleanup_expired(&mut self) {
         let now = Utc::now();
         let ttl = chrono::Duration::seconds(self.config.flow_ttl_secs as i64);

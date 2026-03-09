@@ -154,6 +154,7 @@ impl Metrics {
     }
 
     /// Export metrics in Prometheus text format.
+    #[tracing::instrument(skip(self))]
     pub fn to_prometheus_format(&self) -> String {
         let mut output = String::new();
 
