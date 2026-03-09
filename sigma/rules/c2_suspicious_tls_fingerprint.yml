@@ -1,0 +1,52 @@
+title: Suspicious TLS Client Fingerprint
+id: a1b2c3d4-3333-4000-8000-000000000003
+status: experimental
+level: medium
+description: |
+  Detects TLS connections with client fingerprints (JA3/JA4) that do not
+  match known browser or legitimate application profiles. Non-browser TLS
+  stacks used by C2 frameworks (Cobalt Strike, Metasploit, Sliver) produce
+  distinctive fingerprints. Also flags TLS on non-standard ports as a
+  protocol mismatch indicator.
+author: Network-Beacon Project
+date: 2024/12/01
+modified: 2026/03/08
+references:
+  - https://engineering.salesforce.com/tls-fingerprinting-with-ja3-and-ja3s/
+  - https://attack.mitre.org/techniques/T1573/002/
+  - https://attack.mitre.org/techniques/T1571/
+tags:
+  - attack.command_and_control
+  - attack.t1573.002
+  - attack.t1571
+  - attack.defense_evasion
+logsource:
+  category: network_connection
+  product: network-beacon
+detection:
+  unknown_fingerprint:
+    tls_status: "unknown"
+  suspicious_fingerprint:
+    tls_status: "suspicious"
+  non_standard_port:
+    dst_port|not:
+      - 443
+      - 8443
+      - 993
+      - 995
+      - 465
+    tls_detected: true
+  condition: unknown_fingerprint or suspicious_fingerprint or non_standard_port
+fields:
+  - src_ip
+  - dst_ip
+  - dst_port
+  - tls_ja4_fingerprint
+  - tls_sni
+  - tls_version
+  - tls_status
+falsepositives:
+  - Custom internal applications using non-browser TLS libraries
+  - IoT devices with proprietary TLS stacks
+  - VPN clients using TLS on non-standard ports
+  - Development/testing tools (curl, wget, custom scripts)

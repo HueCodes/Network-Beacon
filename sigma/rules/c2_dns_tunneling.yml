@@ -1,0 +1,46 @@
+title: DNS Tunneling Indicators
+id: a1b2c3d4-2222-4000-8000-000000000002
+status: experimental
+level: high
+description: |
+  Detects DNS traffic exhibiting tunneling characteristics: high Shannon
+  entropy in subdomain labels (indicating encoded data), excessive label
+  lengths, many unique subdomains to the same parent domain, and high
+  query rates. These patterns are consistent with tools like iodine,
+  dnscat2, and Cobalt Strike DNS beacon.
+author: Network-Beacon Project
+date: 2024/12/01
+modified: 2026/03/08
+references:
+  - https://attack.mitre.org/techniques/T1071/004/
+  - https://www.sans.org/white-papers/detecting-dns-tunneling/
+tags:
+  - attack.command_and_control
+  - attack.t1071.004
+  - attack.exfiltration
+  - attack.t1048.003
+logsource:
+  category: dns
+  product: network-beacon
+detection:
+  high_entropy:
+    dns_entropy|gte: 3.5
+  long_labels:
+    dns_max_label_length|gte: 50
+  many_subdomains:
+    dns_unique_subdomains|gte: 10
+  high_query_rate:
+    dns_queries_per_minute|gte: 60
+  condition: high_entropy and (long_labels or many_subdomains or high_query_rate)
+fields:
+  - src_ip
+  - dst_ip
+  - dns_query_domain
+  - dns_entropy
+  - dns_max_label_length
+  - dns_unique_subdomains
+  - dns_queries_per_minute
+falsepositives:
+  - CDN domains with long hashed subdomain labels
+  - Anti-virus or threat intel lookup services
+  - Legitimate services using DNS-based load balancing with many subdomains

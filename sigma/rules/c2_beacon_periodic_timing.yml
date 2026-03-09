@@ -1,0 +1,40 @@
+title: C2 Beacon Periodic Timing Pattern
+id: a1b2c3d4-1111-4000-8000-000000000001
+status: experimental
+level: high
+description: |
+  Detects network flows with highly periodic timing intervals (low coefficient
+  of variation), which is a strong indicator of automated C2 beaconing.
+  Human-driven traffic is inherently stochastic; regular intervals suggest
+  a programmatic heartbeat.
+author: Network-Beacon Project
+date: 2024/12/01
+modified: 2026/03/08
+references:
+  - https://www.activecountermeasures.com/blog/beacon-analysis/
+  - https://attack.mitre.org/techniques/T1071/
+tags:
+  - attack.command_and_control
+  - attack.t1071
+  - attack.t1573
+logsource:
+  category: network_connection
+  product: network-beacon
+detection:
+  selection:
+    cv|lte: 0.1
+    sample_count|gte: 5
+  condition: selection
+fields:
+  - src_ip
+  - dst_ip
+  - dst_port
+  - protocol
+  - cv
+  - sample_count
+  - mean_interval_ms
+falsepositives:
+  - NTP synchronization traffic
+  - Keepalive connections to cloud services
+  - Health check endpoints with fixed intervals
+  - Monitoring agents with regular polling
