@@ -1,6 +1,6 @@
 [package]
 name = "network-beacon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Network Security Team"]
 description = "High-performance CLI tool for detecting C2 beaconing behavior via network flow analysis"
