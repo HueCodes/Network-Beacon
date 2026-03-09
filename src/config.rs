@@ -405,4 +405,118 @@ format = "json"
         assert_eq!(config.detection.profile, DetectionProfile::Paranoid);
         assert_eq!(config.output.format, OutputFormat::Json);
     }
+
+    #[test]
+    fn test_validate_empty_http_ports() {
+        let mut config = Config::default();
+        config.detection.http_ports = vec![];
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("http_ports"));
+    }
+
+    #[test]
+    fn test_validate_empty_tls_ports() {
+        let mut config = Config::default();
+        config.detection.tls_ports = vec![];
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("tls_ports"));
+    }
+
+    #[test]
+    fn test_validate_zero_dns_payload_limit() {
+        let mut config = Config::default();
+        config.capture.dns_payload_limit = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_zero_http_payload_limit() {
+        let mut config = Config::default();
+        config.capture.http_payload_limit = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_zero_min_samples() {
+        let mut config = Config::default();
+        config.analyzer.min_samples = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("min_samples"));
+    }
+
+    #[test]
+    fn test_validate_cv_threshold_out_of_range() {
+        let mut config = Config::default();
+        config.detection.cv_threshold_periodic = 0.0;
+        assert!(config.validate().is_err());
+
+        config.detection.cv_threshold_periodic = 1.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_entropy_threshold_out_of_range() {
+        let mut config = Config::default();
+        config.detection.entropy_threshold = 0.0;
+        assert!(config.validate().is_err());
+
+        config.detection.entropy_threshold = 8.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_zero_unique_subdomains_threshold() {
+        let mut config = Config::default();
+        config.detection.dns.unique_subdomains_threshold = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_parse_config_with_nested_dns_config() {
+        let toml_str = r#"
+[detection.dns]
+entropy_threshold = 4.0
+max_label_length = 30
+unique_subdomains_threshold = 20
+
+[detection.http]
+min_requests = 10
+high_request_rate_threshold = 60
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.detection.dns.entropy_threshold, 4.0);
+        assert_eq!(config.detection.dns.max_label_length, 30);
+        assert_eq!(config.detection.dns.unique_subdomains_threshold, 20);
+        assert_eq!(config.detection.http.min_requests, 10);
+        assert_eq!(config.detection.http.high_request_rate_threshold, 60);
+    }
+
+    #[test]
+    fn test_detection_profile_display() {
+        assert_eq!(DetectionProfile::Paranoid.to_string(), "paranoid");
+        assert_eq!(DetectionProfile::Balanced.to_string(), "balanced");
+        assert_eq!(DetectionProfile::Relaxed.to_string(), "relaxed");
+    }
+
+    #[test]
+    fn test_detection_profile_adjust_min_samples() {
+        assert_eq!(DetectionProfile::Paranoid.adjust_min_samples(5), 3);
+        assert_eq!(DetectionProfile::Balanced.adjust_min_samples(5), 5);
+        assert_eq!(DetectionProfile::Relaxed.adjust_min_samples(5), 8);
+    }
+
+    #[test]
+    fn test_load_or_default_with_none() {
+        let config = Config::load_or_default(None);
+        assert_eq!(config.analyzer.max_flows, 10_000);
+    }
+
+    #[test]
+    fn test_metrics_config_default() {
+        let config = MetricsConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.bind_address, "127.0.0.1:9090");
+        assert_eq!(config.metrics_path, "/metrics");
+    }
 }

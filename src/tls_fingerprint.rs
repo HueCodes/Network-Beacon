@@ -882,4 +882,92 @@ mod tests {
         assert!(ja3_string.starts_with("771,"));
         assert_eq!(ja3_hash.len(), 32);
     }
+
+    #[test]
+    fn test_validate_sni_empty() {
+        assert!(validate_sni("").is_none());
+    }
+
+    #[test]
+    fn test_validate_sni_too_long() {
+        let long_sni = "a".repeat(254);
+        assert!(validate_sni(&long_sni).is_none());
+    }
+
+    #[test]
+    fn test_validate_sni_valid() {
+        assert_eq!(validate_sni("example.com"), Some("example.com".to_string()));
+        assert_eq!(
+            validate_sni("sub.example.com"),
+            Some("sub.example.com".to_string())
+        );
+        assert_eq!(
+            validate_sni("my_host.internal"),
+            Some("my_host.internal".to_string())
+        );
+    }
+
+    #[test]
+    fn test_validate_sni_invalid_chars() {
+        assert!(validate_sni("example .com").is_none()); // space
+        assert!(validate_sni("example;.com").is_none()); // semicolon
+        assert!(validate_sni("exam\nple.com").is_none()); // newline
+    }
+
+    #[test]
+    fn test_validate_sni_invalid_start_end() {
+        assert!(validate_sni(".example.com").is_none());
+        assert!(validate_sni("example.com.").is_none());
+        assert!(validate_sni("-example.com").is_none());
+        assert!(validate_sni("example.com-").is_none());
+    }
+
+    #[test]
+    fn test_tls_version_display() {
+        assert_eq!(format!("{}", TlsVersionInfo::Ssl30), "SSL 3.0");
+        assert_eq!(format!("{}", TlsVersionInfo::Tls10), "TLS 1.0");
+        assert_eq!(format!("{}", TlsVersionInfo::Tls11), "TLS 1.1");
+        assert_eq!(format!("{}", TlsVersionInfo::Tls12), "TLS 1.2");
+        assert_eq!(format!("{}", TlsVersionInfo::Tls13), "TLS 1.3");
+        assert_eq!(
+            format!("{}", TlsVersionInfo::Unknown(0x0305)),
+            "Unknown (0x0305)"
+        );
+    }
+
+    #[test]
+    fn test_tls_fingerprint_is_suspicious() {
+        let fp = TlsFingerprint {
+            fingerprint: "t13_abc_def".to_string(),
+            ja3_hash: "abcdef".to_string(),
+            ja3_string: "771,,,,".to_string(),
+            tls_version: TlsVersionInfo::Tls13,
+            cipher_count: 1,
+            extension_count: 0,
+            sni: None,
+            is_known_good: false,
+            known_match: None,
+            is_known_malicious: false,
+            malicious_match: None,
+            threat_category: None,
+        };
+
+        assert!(
+            fp.is_suspicious(true),
+            "Unknown TLS + periodic should be suspicious"
+        );
+        assert!(
+            !fp.is_suspicious(false),
+            "Unknown TLS + not periodic should not be suspicious"
+        );
+
+        let good_fp = TlsFingerprint {
+            is_known_good: true,
+            ..fp
+        };
+        assert!(
+            !good_fp.is_suspicious(true),
+            "Known-good should never be suspicious"
+        );
+    }
 }

@@ -1047,4 +1047,96 @@ mod tests {
         assert!(format!("{}", FlowClassification::HighlyPeriodic).contains("Periodic"));
         assert!(format!("{}", FlowClassification::Stochastic).contains("Organic"));
     }
+
+    #[test]
+    fn test_flow_analyzer_process_event() {
+        let config = AnalyzerConfig::default();
+        let detection_config = DetectionConfig::default();
+        let mut analyzer = FlowAnalyzer::new(config, detection_config);
+
+        let flow_key = FlowKey::new(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            443,
+            Protocol::Tcp,
+        );
+
+        let event = FlowEvent {
+            flow_key: flow_key.clone(),
+            timestamp: Utc::now(),
+            packet_size: 100,
+            tls_payload: None,
+            dns_payload: None,
+            http_payload: None,
+        };
+
+        analyzer.process_event(event);
+
+        let stats = analyzer.stats();
+        assert_eq!(stats.events_processed, 1);
+        assert_eq!(stats.total_flows, 1);
+    }
+
+    #[test]
+    fn test_flow_analyzer_analyze_all_empty() {
+        let config = AnalyzerConfig::default();
+        let detection_config = DetectionConfig::default();
+        let mut analyzer = FlowAnalyzer::new(config, detection_config);
+
+        let report = analyzer.analyze_all();
+        assert_eq!(report.total_flows, 0);
+        assert_eq!(report.active_flows, 0);
+        assert!(report.suspicious_flows.is_empty());
+    }
+
+    #[test]
+    fn test_flow_analyzer_multiple_events_same_flow() {
+        let config = AnalyzerConfig::default();
+        let detection_config = DetectionConfig::default();
+        let mut analyzer = FlowAnalyzer::new(config, detection_config);
+
+        let flow_key = FlowKey::new(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            80,
+            Protocol::Tcp,
+        );
+
+        let base_time = Utc::now();
+        for i in 0..10 {
+            let event = FlowEvent {
+                flow_key: flow_key.clone(),
+                timestamp: base_time + chrono::Duration::seconds(i),
+                packet_size: 200,
+                tls_payload: None,
+                dns_payload: None,
+                http_payload: None,
+            };
+            analyzer.process_event(event);
+        }
+
+        let stats = analyzer.stats();
+        assert_eq!(stats.events_processed, 10);
+        assert_eq!(stats.total_flows, 1);
+    }
+
+    #[test]
+    fn test_detection_result_insufficient() {
+        let result = DetectionResult::insufficient(3);
+        assert_eq!(result.classification, FlowClassification::Insufficient);
+        assert!(result.cv.is_none());
+        assert!(result.mean_interval_ms.is_none());
+        assert_eq!(result.sample_count, 3);
+    }
+
+    #[test]
+    fn test_cv_detector_min_samples() {
+        let detector = CvDetector::new(10);
+        assert_eq!(detector.min_samples(), 10);
+
+        let default_detector = CvDetector::default();
+        assert_eq!(default_detector.min_samples(), 5);
+    }
+
+    use crate::config::DetectionConfig;
 }

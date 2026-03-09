@@ -658,4 +658,94 @@ mod tests {
         assert!(!is_suspicious_qtype(1)); // A
         assert!(!is_suspicious_qtype(5)); // CNAME
     }
+
+    #[test]
+    fn test_dns_detector_configurable_unique_subdomains_threshold() {
+        let config = DnsDetectorConfig {
+            unique_subdomains_threshold: 3,
+            ..DnsDetectorConfig::default()
+        };
+        let detector = DnsDetector::new(config);
+
+        let mut tracker = DnsFlowTracker::new();
+
+        // Add 4 unique subdomains (exceeds threshold of 3)
+        for i in 0..4 {
+            let subdomain = format!("sub{}", i);
+            let query = DnsQuery {
+                qname: format!("{}.example.com", subdomain),
+                labels: vec![subdomain, "example".to_string(), "com".to_string()],
+                qtype: 1,
+                qclass: 1,
+            };
+            tracker.add_query(&query, Utc::now());
+        }
+
+        let result = detector.analyze(&tracker);
+        assert!(
+            result.is_suspicious,
+            "Should flag many unique subdomains with low threshold"
+        );
+        assert!(result
+            .indicators
+            .iter()
+            .any(|i| matches!(i, DnsIndicator::ManySubdomains { .. })));
+    }
+
+    #[test]
+    fn test_dns_detector_not_suspicious_below_threshold() {
+        let config = DnsDetectorConfig {
+            unique_subdomains_threshold: 100,
+            entropy_threshold: 5.0, // very high threshold
+            max_label_length: 100,
+            ..DnsDetectorConfig::default()
+        };
+        let detector = DnsDetector::new(config);
+
+        let mut tracker = DnsFlowTracker::new();
+
+        let query = DnsQuery {
+            qname: "www.example.com".to_string(),
+            labels: vec!["www".to_string(), "example".to_string(), "com".to_string()],
+            qtype: 1,
+            qclass: 1,
+        };
+        tracker.add_query(&query, Utc::now());
+
+        let result = detector.analyze(&tracker);
+        assert!(!result.is_suspicious);
+    }
+
+    #[test]
+    fn test_dns_flow_tracker_query_rate() {
+        let mut tracker = DnsFlowTracker::new();
+        let base_time = Utc::now();
+
+        // Add 10 queries over 1 second -> rate = 10 q/s
+        for i in 0..10 {
+            let query = DnsQuery {
+                qname: "test.example.com".to_string(),
+                labels: vec!["test".to_string(), "example".to_string(), "com".to_string()],
+                qtype: 1,
+                qclass: 1,
+            };
+            tracker.add_query(&query, base_time + chrono::Duration::milliseconds(i * 100));
+        }
+
+        let rate = tracker.query_rate();
+        assert!(rate > 5.0, "Query rate should be high: {}", rate);
+    }
+
+    #[test]
+    fn test_dns_flow_tracker_empty_rate() {
+        let tracker = DnsFlowTracker::new();
+        assert_eq!(tracker.query_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_is_dns_port_in_custom_list() {
+        let ports = vec![53, 5353, 8053];
+        assert!(is_dns_port_in(8053, &ports));
+        assert!(!is_dns_port_in(80, &ports));
+    }
 }

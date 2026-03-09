@@ -445,4 +445,94 @@ mod tests {
         assert_eq!(format_interval(Some(60000.0)), "60.0s");
         assert_eq!(format_interval(None), "N/A");
     }
+
+    #[test]
+    fn test_export_json_with_http_analysis() {
+        use crate::capture::{FlowKey, Protocol};
+        use crate::http_detector::{HttpAnalysisResult, HttpIndicator, Severity};
+
+        let flow = FlowAnalysis {
+            flow_key: FlowKey::new(
+                "10.0.0.1".parse().unwrap(),
+                "10.0.0.2".parse().unwrap(),
+                8080,
+                Protocol::Tcp,
+            ),
+            classification: FlowClassification::JitteredPeriodic,
+            cv: Some(0.25),
+            mean_interval_ms: Some(30000.0),
+            packet_count: 50,
+            total_bytes: 5000,
+            duration_secs: 1500,
+            tls_fingerprint: None,
+            tls_status: crate::tls_fingerprint::TlsStatus::Plaintext,
+            dns_analysis: None,
+            http_analysis: Some(HttpAnalysisResult {
+                is_suspicious: true,
+                severity: Severity::High,
+                request_count: 50,
+                post_ratio: 0.9,
+                content_length_cv: Some(0.05),
+                request_rate: 0.5,
+                indicators: vec![HttpIndicator::HighPostRatio { ratio: 90 }],
+                user_agent: Some("curl/7.68.0".to_string()),
+            }),
+            indicators: vec!["http_beacon".to_string()],
+            geo_info: None,
+        };
+
+        let report = AnalysisReport {
+            timestamp: Utc::now(),
+            total_flows: 1,
+            active_flows: 1,
+            suspicious_flows: vec![flow],
+            events_processed: 100,
+        };
+
+        let json_output = export_json(&report);
+        assert!(json_output.contains("http_analysis"));
+        assert!(json_output.contains("\"post_ratio\""));
+        assert!(json_output.contains("curl/7.68.0"));
+        assert!(json_output.contains("http_beacon"));
+    }
+
+    #[test]
+    fn test_export_text_no_suspicious() {
+        let report = AnalysisReport {
+            timestamp: Utc::now(),
+            total_flows: 5,
+            active_flows: 3,
+            suspicious_flows: vec![],
+            events_processed: 50,
+        };
+
+        let text = export_text(&report);
+        assert!(text.contains("None detected"));
+        assert!(text.contains("Total Flows: 5"));
+    }
+
+    #[test]
+    fn test_export_jsonl_format() {
+        let report = AnalysisReport {
+            timestamp: Utc::now(),
+            total_flows: 0,
+            active_flows: 0,
+            suspicious_flows: vec![],
+            events_processed: 0,
+        };
+
+        let output = export_jsonl(&report);
+        // First line should be summary
+        let first_line = output.lines().next().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(first_line).unwrap();
+        assert_eq!(parsed["type"], "summary");
+    }
+
+    #[test]
+    fn test_output_format_jsonlines_alias() {
+        assert_eq!(
+            "jsonlines".parse::<OutputFormat>().unwrap(),
+            OutputFormat::JsonLines
+        );
+    }
 }

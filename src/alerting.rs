@@ -637,4 +637,49 @@ mod tests {
         assert_eq!(config.port, 514);
         assert_eq!(config.protocol, "udp");
     }
+
+    #[test]
+    fn test_alert_service_construction_disabled() {
+        let config = AlertingConfig::default();
+        let service = AlertService::new(config);
+        assert!(!service.is_enabled());
+    }
+
+    #[test]
+    fn test_alert_service_construction_with_webhook() {
+        let config = AlertingConfig {
+            enabled: true,
+            webhook_timeout_secs: 5,
+            webhooks: vec![WebhookConfig {
+                url: "https://example.com/hook".to_string(),
+                min_severity: AlertSeverity::High,
+                headers: std::collections::HashMap::new(),
+            }],
+            ..AlertingConfig::default()
+        };
+        let service = AlertService::new(config);
+        assert!(service.is_enabled());
+    }
+
+    #[test]
+    fn test_alert_severity_display() {
+        assert_eq!(format!("{}", AlertSeverity::Low), "low");
+        assert_eq!(format!("{}", AlertSeverity::Medium), "medium");
+        assert_eq!(format!("{}", AlertSeverity::High), "high");
+        assert_eq!(format!("{}", AlertSeverity::Critical), "critical");
+    }
+
+    #[test]
+    fn test_alert_severity_invalid_parse() {
+        assert!("invalid".parse::<AlertSeverity>().is_err());
+    }
+
+    #[test]
+    fn test_detection_type_all_variants_display() {
+        assert_eq!(format!("{}", DetectionType::HighRiskGeo), "high_risk_geo");
+        assert_eq!(
+            format!("{}", DetectionType::ProtocolMismatch),
+            "protocol_mismatch"
+        );
+    }
 }

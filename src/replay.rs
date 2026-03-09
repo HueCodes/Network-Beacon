@@ -359,4 +359,103 @@ mod tests {
         assert_eq!(stats.packets_skipped, 0);
         assert_eq!(stats.duration_ms, 0);
     }
+
+    #[test]
+    fn test_validate_pcap_file_not_found() {
+        let path = Path::new("/nonexistent/file.pcap");
+        let result = validate_pcap_file(path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not found"),
+            "Error should mention 'not found': {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_validate_pcap_file_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("empty.pcap");
+        std::fs::write(&file_path, b"").unwrap();
+
+        let result = validate_pcap_file(&file_path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("empty"),
+            "Error should mention 'empty': {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_validate_pcap_file_invalid_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("bad.pcap");
+        std::fs::write(&file_path, b"NOT_PCAP_DATA_HERE").unwrap();
+
+        let result = validate_pcap_file(&file_path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Not a valid PCAP"),
+            "Error should mention invalid PCAP: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_validate_pcap_file_valid_le_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("valid.pcap");
+        // Write little-endian PCAP magic bytes followed by some data
+        let mut data = vec![0xd4, 0xc3, 0xb2, 0xa1];
+        data.extend_from_slice(&[0u8; 20]); // padding
+        std::fs::write(&file_path, &data).unwrap();
+
+        let result = validate_pcap_file(&file_path);
+        assert!(result.is_ok(), "Should accept valid PCAP LE magic bytes");
+    }
+
+    #[test]
+    fn test_validate_pcap_file_valid_be_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("valid_be.pcap");
+        // Write big-endian PCAP magic bytes
+        let mut data = vec![0xa1, 0xb2, 0xc3, 0xd4];
+        data.extend_from_slice(&[0u8; 20]);
+        std::fs::write(&file_path, &data).unwrap();
+
+        let result = validate_pcap_file(&file_path);
+        assert!(result.is_ok(), "Should accept valid PCAP BE magic bytes");
+    }
+
+    #[test]
+    fn test_validate_pcap_file_too_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("short.pcap");
+        // Write only 2 bytes - not enough for magic
+        std::fs::write(&file_path, &[0xd4, 0xc3]).unwrap();
+
+        let result = validate_pcap_file(&file_path);
+        assert!(
+            result.is_err(),
+            "Should fail for file too short to read magic bytes"
+        );
+    }
+
+    #[test]
+    fn test_pcap_replay_new() {
+        let config = ReplayConfig {
+            speed: 2.0,
+            max_events: 100,
+            channel_size: 500,
+        };
+        let replay = PcapReplay::new("/tmp/test.pcap", config);
+        assert_eq!(replay.file_path, "/tmp/test.pcap");
+        assert_eq!(replay.config.speed, 2.0);
+        assert_eq!(replay.config.max_events, 100);
+        assert_eq!(replay.config.channel_size, 500);
+    }
 }

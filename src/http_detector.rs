@@ -853,4 +853,92 @@ mod tests {
         assert_eq!(HttpMethod::from_str("PUT"), HttpMethod::Put);
         assert_eq!(HttpMethod::from_str("unknown"), HttpMethod::Other);
     }
+
+    #[test]
+    fn test_configurable_high_request_rate_threshold() {
+        let config = HttpDetectorConfig {
+            high_request_rate_threshold: 5, // very low threshold
+            min_requests: 3,
+            ..HttpDetectorConfig::default()
+        };
+        let detector = HttpDetector::new(config);
+        let mut tracker = HttpFlowTracker::new();
+        let base_time = Utc::now();
+
+        // Add 10 requests in 10 seconds -> 60 req/min, exceeds threshold of 5
+        for i in 0..10 {
+            tracker.add_request(HttpRequest {
+                method: HttpMethod::Get,
+                uri: "/index.html".to_string(),
+                user_agent: Some("Mozilla/5.0".to_string()),
+                content_length: None,
+                host: None,
+                timestamp: base_time + chrono::Duration::seconds(i),
+            });
+        }
+
+        let result = detector.analyze(&tracker);
+        assert!(result.is_suspicious);
+        assert!(result
+            .indicators
+            .iter()
+            .any(|i| matches!(i, HttpIndicator::HighRequestRate { .. })));
+    }
+
+    #[test]
+    fn test_http_detector_below_min_requests() {
+        let detector = HttpDetector::default();
+        let mut tracker = HttpFlowTracker::new();
+
+        // Only add 2 requests (default min_requests is 5)
+        for i in 0..2 {
+            tracker.add_request(HttpRequest {
+                method: HttpMethod::Post,
+                uri: format!("/api/{}", i),
+                user_agent: Some("PowerShell/7.0".to_string()),
+                content_length: Some(100),
+                host: None,
+                timestamp: Utc::now(),
+            });
+        }
+
+        let result = detector.analyze(&tracker);
+        assert!(
+            !result.is_suspicious,
+            "Should not be suspicious with too few requests"
+        );
+        assert_eq!(result.request_count, 0);
+    }
+
+    #[test]
+    fn test_http_method_display() {
+        assert_eq!(format!("{}", HttpMethod::Get), "GET");
+        assert_eq!(format!("{}", HttpMethod::Post), "POST");
+        assert_eq!(format!("{}", HttpMethod::Delete), "DELETE");
+        assert_eq!(format!("{}", HttpMethod::Head), "HEAD");
+        assert_eq!(format!("{}", HttpMethod::Options), "OPTIONS");
+        assert_eq!(format!("{}", HttpMethod::Patch), "PATCH");
+        assert_eq!(format!("{}", HttpMethod::Other), "OTHER");
+    }
+
+    #[test]
+    fn test_http_flow_tracker_request_rate_single_request() {
+        let mut tracker = HttpFlowTracker::new();
+        tracker.add_request(HttpRequest {
+            method: HttpMethod::Get,
+            uri: "/".to_string(),
+            user_agent: None,
+            content_length: None,
+            host: None,
+            timestamp: Utc::now(),
+        });
+        assert_eq!(tracker.request_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_is_http_port_in_custom_list() {
+        let ports = vec![80, 8080, 9090];
+        assert!(is_http_port_in(9090, &ports));
+        assert!(!is_http_port_in(443, &ports));
+    }
 }
