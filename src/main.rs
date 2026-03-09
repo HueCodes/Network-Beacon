@@ -582,6 +582,10 @@ async fn run_offline_analysis(
 
     use crate::analyzer::{calculate_statistics, timestamps_to_deltas, FlowClassification};
     use crate::capture::{FlowKey, Protocol};
+    use crate::replay::validate_pcap_file;
+
+    // Validate file before opening
+    validate_pcap_file(std::path::Path::new(file))?;
 
     if output_format == OutputFormat::Text {
         println!("Analyzing PCAP file: {}", file);

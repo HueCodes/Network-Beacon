@@ -182,12 +182,10 @@ impl DnsFlowTracker {
 
     /// Calculates query rate (queries per second)
     pub fn query_rate(&self) -> f64 {
-        if self.query_times.len() < 2 {
+        let (Some(first), Some(last)) = (self.query_times.first(), self.query_times.last()) else {
             return 0.0;
-        }
+        };
 
-        let first = self.query_times.first().unwrap();
-        let last = self.query_times.last().unwrap();
         let duration_secs = last.signed_duration_since(*first).num_milliseconds() as f64 / 1000.0;
 
         if duration_secs > 0.0 {

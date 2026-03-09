@@ -86,6 +86,48 @@ pub struct ReplayStats {
     pub duration_ms: u64,
 }
 
+/// Validates that a file looks like a valid PCAP or PCAPNG file by checking magic bytes.
+pub fn validate_pcap_file(path: &Path) -> Result<()> {
+    use std::io::Read;
+
+    if !path.exists() {
+        anyhow::bail!("PCAP file not found: {}", path.display());
+    }
+
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("Cannot read file metadata: {}", path.display()))?;
+
+    if metadata.len() == 0 {
+        anyhow::bail!("PCAP file is empty: {}", path.display());
+    }
+
+    // Check magic bytes: PCAP (0xa1b2c3d4 or 0xd4c3b2a1) or PCAPNG (0x0a0d0d0a)
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("Cannot open file: {}", path.display()))?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic)
+        .with_context(|| format!("Cannot read file header: {}", path.display()))?;
+
+    let magic_u32 = u32::from_ne_bytes(magic);
+    match magic_u32 {
+        0xa1b2c3d4 | 0xd4c3b2a1 => {} // Standard PCAP (big/little endian)
+        0xa1b23c4d | 0x4d3cb2a1 => {} // PCAP with nanosecond timestamps
+        0x0a0d0d0a => {}              // PCAPNG
+        _ => {
+            anyhow::bail!(
+                "Not a valid PCAP file (unexpected magic bytes: {:02x}{:02x}{:02x}{:02x}): {}",
+                magic[0],
+                magic[1],
+                magic[2],
+                magic[3],
+                path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Replays a PCAP file, parsing packets and sending FlowEvents.
 async fn replay_file(
     file_path: &str,
@@ -93,9 +135,7 @@ async fn replay_file(
     config: ReplayConfig,
 ) -> Result<ReplayStats> {
     let path = Path::new(file_path);
-    if !path.exists() {
-        anyhow::bail!("PCAP file not found: {}", file_path);
-    }
+    validate_pcap_file(path)?;
 
     info!("Opening PCAP file: {}", file_path);
 

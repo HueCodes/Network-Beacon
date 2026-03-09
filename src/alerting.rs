@@ -381,28 +381,68 @@ impl AlertService {
         true
     }
 
-    /// Sends an alert to a webhook.
+    /// Maximum number of retry attempts for webhook delivery.
+    const WEBHOOK_MAX_RETRIES: u32 = 3;
+    /// Base delay between retries (doubled each attempt).
+    const WEBHOOK_RETRY_BASE_DELAY_MS: u64 = 500;
+
+    /// Sends an alert to a webhook with retry logic.
     async fn send_webhook(&self, webhook: &WebhookConfig, alert: &Alert) {
-        let mut request = self.http_client.post(&webhook.url).json(alert);
+        for attempt in 0..=Self::WEBHOOK_MAX_RETRIES {
+            let mut request = self.http_client.post(&webhook.url).json(alert);
 
-        for (key, value) in &webhook.headers {
-            request = request.header(key, value);
-        }
+            for (key, value) in &webhook.headers {
+                request = request.header(key, value);
+            }
 
-        match request.send().await {
-            Ok(response) => {
-                if response.status().is_success() {
-                    debug!("Webhook sent successfully to {}", webhook.url);
-                } else {
+            match request.send().await {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        debug!("Webhook sent successfully to {}", webhook.url);
+                        return;
+                    }
+                    let status = response.status();
+                    if status.is_server_error() && attempt < Self::WEBHOOK_MAX_RETRIES {
+                        let delay = Self::WEBHOOK_RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+                        warn!(
+                            "Webhook returned {} from {}, retrying in {}ms (attempt {}/{})",
+                            status,
+                            webhook.url,
+                            delay,
+                            attempt + 1,
+                            Self::WEBHOOK_MAX_RETRIES
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
                     warn!(
                         "Webhook returned error status {} from {}",
-                        response.status(),
-                        webhook.url
+                        status, webhook.url
                     );
+                    return;
                 }
-            }
-            Err(e) => {
-                error!("Failed to send webhook to {}: {}", webhook.url, e);
+                Err(e) => {
+                    if attempt < Self::WEBHOOK_MAX_RETRIES {
+                        let delay = Self::WEBHOOK_RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+                        warn!(
+                            "Webhook to {} failed: {}, retrying in {}ms (attempt {}/{})",
+                            webhook.url,
+                            e,
+                            delay,
+                            attempt + 1,
+                            Self::WEBHOOK_MAX_RETRIES
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
+                    error!(
+                        "Failed to send webhook to {} after {} attempts: {}",
+                        webhook.url,
+                        Self::WEBHOOK_MAX_RETRIES + 1,
+                        e
+                    );
+                    return;
+                }
             }
         }
     }
