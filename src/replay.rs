@@ -436,7 +436,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("short.pcap");
         // Write only 2 bytes - not enough for magic
-        std::fs::write(&file_path, &[0xd4, 0xc3]).unwrap();
+        std::fs::write(&file_path, [0xd4, 0xc3]).unwrap();
 
         let result = validate_pcap_file(&file_path);
         assert!(
