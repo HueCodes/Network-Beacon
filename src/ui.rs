@@ -32,7 +32,10 @@ use crate::tls_fingerprint::TlsStatus;
 /// Terminal type alias for convenience.
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
-/// UI state and configuration.
+/// TUI application state.
+///
+/// Holds the current analysis report, table selection, and overlay visibility.
+/// Updated each tick from the report channel and rendered by [`render`].
 pub struct App {
     /// Current analysis report.
     report: Option<AnalysisReport>,
@@ -159,6 +162,9 @@ impl Default for App {
 }
 
 /// Initializes the terminal for TUI rendering.
+///
+/// Enables raw mode and alternate screen. Must be paired with
+/// [`restore_terminal`] on exit to avoid leaving the terminal in a broken state.
 pub fn init_terminal() -> Result<Term> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -168,7 +174,7 @@ pub fn init_terminal() -> Result<Term> {
     Ok(terminal)
 }
 
-/// Restores the terminal to its original state.
+/// Restores the terminal to its original state (raw mode off, alternate screen off, cursor visible).
 pub fn restore_terminal(terminal: &mut Term) -> Result<()> {
     disable_raw_mode()?;
     execute!(
@@ -982,10 +988,28 @@ fn format_duration(secs: i64) -> String {
 }
 
 /// Main UI event loop.
+///
+/// Renders the TUI dashboard, polls for keyboard events, and updates
+/// when new analysis reports arrive. Returns when the user presses `q` or `Esc`.
+/// Always restores the terminal state before returning, even on error.
 pub async fn run_ui(mut report_rx: mpsc::Receiver<AnalysisReport>) -> Result<()> {
     let mut terminal = init_terminal()?;
-    let mut app = App::new();
+    let result = run_ui_loop(&mut terminal, &mut report_rx).await;
 
+    // Always restore terminal, even if the loop errored
+    if let Err(e) = restore_terminal(&mut terminal) {
+        tracing::error!("Failed to restore terminal: {}", e);
+    }
+
+    result
+}
+
+/// Inner UI event loop, separated so we can guarantee terminal restoration.
+async fn run_ui_loop(
+    terminal: &mut Term,
+    report_rx: &mut mpsc::Receiver<AnalysisReport>,
+) -> Result<()> {
+    let mut app = App::new();
     let tick_rate = Duration::from_millis(100);
 
     while app.is_running() {
@@ -1007,6 +1031,214 @@ pub async fn run_ui(mut report_rx: mpsc::Receiver<AnalysisReport>) -> Result<()>
         }
     }
 
-    restore_terminal(&mut terminal)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analyzer::AnalysisReport;
+    use crate::capture::{FlowKey, Protocol};
+    use chrono::Utc;
+
+    fn make_report(suspicious_count: usize) -> AnalysisReport {
+        let flows: Vec<FlowAnalysis> = (0..suspicious_count)
+            .map(|i| FlowAnalysis {
+                flow_key: FlowKey::new(
+                    format!("10.0.0.{}", i).parse().unwrap(),
+                    "10.0.0.100".parse().unwrap(),
+                    443,
+                    Protocol::Tcp,
+                ),
+                classification: FlowClassification::HighlyPeriodic,
+                cv: Some(0.05),
+                mean_interval_ms: Some(60000.0),
+                packet_count: 100,
+                total_bytes: 50000,
+                duration_secs: 3600,
+                tls_fingerprint: None,
+                tls_status: TlsStatus::Plaintext,
+                dns_analysis: None,
+                http_analysis: None,
+                indicators: vec!["periodic_beacon".to_string()],
+                geo_info: None,
+            })
+            .collect();
+
+        AnalysisReport {
+            timestamp: Utc::now(),
+            total_flows: 10,
+            active_flows: 5,
+            suspicious_flows: flows,
+            events_processed: 1000,
+        }
+    }
+
+    #[test]
+    fn test_app_new_defaults() {
+        let app = App::new();
+        assert!(app.is_running());
+        assert!(app.report.is_none());
+        assert!(!app.show_help);
+        assert!(app.selected_flow.is_none());
+    }
+
+    #[test]
+    fn test_app_handle_key_quit() {
+        let mut app = App::new();
+        assert!(app.is_running());
+        app.handle_key(KeyCode::Char('q'));
+        assert!(!app.is_running());
+    }
+
+    #[test]
+    fn test_app_handle_key_esc_quit() {
+        let mut app = App::new();
+        app.handle_key(KeyCode::Esc);
+        assert!(!app.is_running());
+    }
+
+    #[test]
+    fn test_app_handle_key_help_toggle() {
+        let mut app = App::new();
+        assert!(!app.show_help);
+        app.handle_key(KeyCode::Char('?'));
+        assert!(app.show_help);
+        app.handle_key(KeyCode::Char('?'));
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn test_app_update_report() {
+        let mut app = App::new();
+        let report = make_report(2);
+        app.update_report(report);
+        assert!(app.report.is_some());
+        assert_eq!(app.events_processed, 1000);
+    }
+
+    #[test]
+    fn test_app_navigation_empty() {
+        let mut app = App::new();
+        // Navigation with no report should not panic
+        app.handle_key(KeyCode::Down);
+        app.handle_key(KeyCode::Up);
+        app.handle_key(KeyCode::Home);
+        app.handle_key(KeyCode::End);
+        app.handle_key(KeyCode::Enter);
+    }
+
+    #[test]
+    fn test_app_navigation_with_data() {
+        let mut app = App::new();
+        app.update_report(make_report(3));
+
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.table_state.selected(), Some(0));
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.table_state.selected(), Some(1));
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.table_state.selected(), Some(2));
+        // Should clamp at last row
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.table_state.selected(), Some(2));
+
+        app.handle_key(KeyCode::Up);
+        assert_eq!(app.table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_app_home_end() {
+        let mut app = App::new();
+        app.update_report(make_report(5));
+
+        app.handle_key(KeyCode::End);
+        assert_eq!(app.table_state.selected(), Some(4));
+
+        app.handle_key(KeyCode::Home);
+        assert_eq!(app.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_app_detail_toggle() {
+        let mut app = App::new();
+        app.update_report(make_report(1));
+
+        app.handle_key(KeyCode::Down); // Select first row
+        app.handle_key(KeyCode::Enter); // Open detail
+        assert_eq!(app.selected_flow, Some(0));
+        app.handle_key(KeyCode::Enter); // Close detail
+        assert!(app.selected_flow.is_none());
+    }
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(1024), "1.00 KB");
+        assert_eq!(format_bytes(1048576), "1.00 MB");
+        assert_eq!(format_bytes(1073741824), "1.00 GB");
+    }
+
+    #[test]
+    fn test_format_duration() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(30), "30s");
+        assert_eq!(format_duration(90), "1m 30s");
+        assert_eq!(format_duration(3661), "1h 1m");
+    }
+
+    #[test]
+    fn test_format_indicators_empty() {
+        let flow = FlowAnalysis {
+            flow_key: FlowKey::new(
+                "10.0.0.1".parse().unwrap(),
+                "10.0.0.2".parse().unwrap(),
+                443,
+                Protocol::Tcp,
+            ),
+            classification: FlowClassification::Stochastic,
+            cv: Some(1.5),
+            mean_interval_ms: None,
+            packet_count: 10,
+            total_bytes: 1000,
+            duration_secs: 60,
+            tls_fingerprint: None,
+            tls_status: TlsStatus::Plaintext,
+            dns_analysis: None,
+            http_analysis: None,
+            indicators: vec![],
+            geo_info: None,
+        };
+
+        let (display, _style) = format_indicators(&flow);
+        assert_eq!(display, "None");
+    }
+
+    #[test]
+    fn test_format_geo_none() {
+        let flow = FlowAnalysis {
+            flow_key: FlowKey::new(
+                "10.0.0.1".parse().unwrap(),
+                "10.0.0.2".parse().unwrap(),
+                443,
+                Protocol::Tcp,
+            ),
+            classification: FlowClassification::Stochastic,
+            cv: None,
+            mean_interval_ms: None,
+            packet_count: 1,
+            total_bytes: 100,
+            duration_secs: 0,
+            tls_fingerprint: None,
+            tls_status: TlsStatus::Plaintext,
+            dns_analysis: None,
+            http_analysis: None,
+            indicators: vec![],
+            geo_info: None,
+        };
+
+        let (display, _style) = format_geo(&flow);
+        assert_eq!(display, "--");
+    }
 }
