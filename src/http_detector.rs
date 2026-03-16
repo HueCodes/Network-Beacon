@@ -216,8 +216,8 @@ pub enum HttpMethod {
 }
 
 impl HttpMethod {
-    /// Parse HTTP method from string.
-    pub fn from_str(s: &str) -> Self {
+    /// Parse an HTTP method string (case-insensitive) into an [`HttpMethod`] variant.
+    pub fn parse(s: &str) -> Self {
         match s.to_uppercase().as_str() {
             "GET" => Self::Get,
             "POST" => Self::Post,
@@ -264,7 +264,15 @@ pub struct HttpRequest {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Maximum requests/URIs/content-lengths retained per tracker.
+const MAX_TRACKER_ENTRIES: usize = 10_000;
+/// Number of oldest entries to drain when a cap is hit.
+const TRACKER_DRAIN_COUNT: usize = 1_000;
+
 /// Tracks HTTP requests for a specific flow/destination.
+///
+/// Collects request metadata for beacon pattern analysis. Internal vectors
+/// are capped at [`MAX_TRACKER_ENTRIES`] to prevent unbounded memory growth.
 #[derive(Debug, Clone)]
 pub struct HttpFlowTracker {
     /// All requests in this flow
@@ -323,6 +331,17 @@ impl HttpFlowTracker {
         self.uris.push(request.uri.clone());
 
         self.requests.push(request);
+
+        // Cap vectors to prevent unbounded growth
+        if self.requests.len() > MAX_TRACKER_ENTRIES {
+            self.requests.drain(0..TRACKER_DRAIN_COUNT);
+        }
+        if self.uris.len() > MAX_TRACKER_ENTRIES {
+            self.uris.drain(0..TRACKER_DRAIN_COUNT);
+        }
+        if self.post_content_lengths.len() > MAX_TRACKER_ENTRIES {
+            self.post_content_lengths.drain(0..TRACKER_DRAIN_COUNT);
+        }
     }
 
     /// Calculate the ratio of POST requests.
@@ -618,7 +637,7 @@ pub fn parse_http_request(payload: &[u8], timestamp: DateTime<Utc>) -> Option<Ht
         return None;
     }
 
-    let method = HttpMethod::from_str(parts[0]);
+    let method = HttpMethod::parse(parts[0]);
     let uri = parts[1].to_string();
 
     // Parse headers
@@ -848,10 +867,10 @@ mod tests {
 
     #[test]
     fn test_http_method_parsing() {
-        assert_eq!(HttpMethod::from_str("GET"), HttpMethod::Get);
-        assert_eq!(HttpMethod::from_str("post"), HttpMethod::Post);
-        assert_eq!(HttpMethod::from_str("PUT"), HttpMethod::Put);
-        assert_eq!(HttpMethod::from_str("unknown"), HttpMethod::Other);
+        assert_eq!(HttpMethod::parse("GET"), HttpMethod::Get);
+        assert_eq!(HttpMethod::parse("post"), HttpMethod::Post);
+        assert_eq!(HttpMethod::parse("PUT"), HttpMethod::Put);
+        assert_eq!(HttpMethod::parse("unknown"), HttpMethod::Other);
     }
 
     #[test]
@@ -940,5 +959,98 @@ mod tests {
         let ports = vec![80, 8080, 9090];
         assert!(is_http_port_in(9090, &ports));
         assert!(!is_http_port_in(443, &ports));
+    }
+
+    #[test]
+    fn test_parse_http_request_too_short() {
+        let payload = b"GET /";
+        assert!(parse_http_request(payload, Utc::now()).is_none());
+    }
+
+    #[test]
+    fn test_parse_http_request_no_http_version() {
+        let payload = b"GET /path\r\nHost: x\r\n\r\n";
+        assert!(parse_http_request(payload, Utc::now()).is_none());
+    }
+
+    #[test]
+    fn test_parse_http_request_binary_payload() {
+        let payload = [
+            0xff, 0xfe, 0xfd, 0xfc, 0xfb, 0xfa, 0xf9, 0xf8, 0xf7, 0xf6, 0xf5,
+        ];
+        assert!(parse_http_request(&payload, Utc::now()).is_none());
+    }
+
+    #[test]
+    fn test_http_tracker_caps_requests() {
+        let mut tracker = HttpFlowTracker::new();
+        let timestamp = Utc::now();
+
+        for i in 0..(MAX_TRACKER_ENTRIES + 500) {
+            tracker.add_request(HttpRequest {
+                method: HttpMethod::Get,
+                uri: format!("/path/{}", i),
+                user_agent: None,
+                content_length: None,
+                host: None,
+                timestamp,
+            });
+        }
+
+        assert!(
+            tracker.requests.len() <= MAX_TRACKER_ENTRIES,
+            "requests should be capped at {}, got {}",
+            MAX_TRACKER_ENTRIES,
+            tracker.requests.len()
+        );
+        assert!(
+            tracker.uris.len() <= MAX_TRACKER_ENTRIES,
+            "uris should be capped"
+        );
+    }
+
+    #[test]
+    fn test_http_flow_tracker_empty_post_ratio() {
+        let tracker = HttpFlowTracker::new();
+        assert_eq!(tracker.post_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_content_length_cv_single_request() {
+        let mut tracker = HttpFlowTracker::new();
+        tracker.add_request(HttpRequest {
+            method: HttpMethod::Post,
+            uri: "/api".to_string(),
+            user_agent: None,
+            content_length: Some(100),
+            host: None,
+            timestamp: Utc::now(),
+        });
+        assert!(tracker.content_length_cv().is_none());
+    }
+
+    #[test]
+    fn test_http_indicator_display() {
+        let indicator = HttpIndicator::SuspiciousUserAgent {
+            pattern: "curl/".to_string(),
+            severity: Severity::Low,
+        };
+        let display = format!("{}", indicator);
+        assert!(display.contains("curl/"));
+
+        let indicator2 = HttpIndicator::HighPostRatio { ratio: 90 };
+        assert!(format!("{}", indicator2).contains("90%"));
+
+        let indicator3 = HttpIndicator::ConsistentPayloadSize { cv: 50 };
+        assert!(format!("{}", indicator3).contains("0.050"));
+
+        let indicator4 = HttpIndicator::HighRequestRate { rate: 120 };
+        assert!(format!("{}", indicator4).contains("120/min"));
+
+        let indicator5 = HttpIndicator::SuspiciousUrl {
+            pattern: "/beacon".to_string(),
+            severity: Severity::High,
+        };
+        assert!(format!("{}", indicator5).contains("/beacon"));
     }
 }

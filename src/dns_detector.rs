@@ -120,7 +120,18 @@ pub fn is_suspicious_qtype(qtype: u16) -> bool {
     )
 }
 
-/// Tracks DNS queries for a specific flow/domain
+/// Maximum query timestamps retained per tracker to prevent unbounded growth.
+const MAX_QUERY_TIMES: usize = 10_000;
+/// Number of oldest entries to drain when the query times cap is hit.
+const QUERY_TIMES_DRAIN: usize = 1_000;
+/// Maximum unique subdomains tracked per flow.
+const MAX_UNIQUE_SUBDOMAINS: usize = 5_000;
+
+/// Tracks DNS queries for a specific flow/domain.
+///
+/// Collects query timestamps, subdomain diversity, and entropy statistics
+/// for use by [`DnsDetector`]. Internal vectors and maps are capped to
+/// prevent unbounded memory growth under high query rates.
 #[derive(Debug, Clone)]
 pub struct DnsFlowTracker {
     /// Timestamps of queries
@@ -149,9 +160,14 @@ impl DnsFlowTracker {
         }
     }
 
-    /// Adds a DNS query to the tracker
+    /// Adds a DNS query to the tracker, updating timestamps, subdomain stats, and entropy.
     pub fn add_query(&mut self, query: &DnsQuery, timestamp: DateTime<Utc>) {
         self.query_times.push(timestamp);
+
+        // Cap query_times to prevent unbounded growth
+        if self.query_times.len() > MAX_QUERY_TIMES {
+            self.query_times.drain(0..QUERY_TIMES_DRAIN);
+        }
 
         // Track query type
         *self.query_types.entry(query.qtype).or_insert(0) += 1;
@@ -165,7 +181,12 @@ impl DnsFlowTracker {
         // Track subdomains (everything except base domain)
         if query.labels.len() > 2 {
             let subdomain = query.labels[..query.labels.len() - 2].join(".");
-            *self.unique_subdomains.entry(subdomain.clone()).or_insert(0) += 1;
+            // Only track new subdomains if under the cap (existing keys always get updated)
+            if self.unique_subdomains.len() < MAX_UNIQUE_SUBDOMAINS
+                || self.unique_subdomains.contains_key(&subdomain)
+            {
+                *self.unique_subdomains.entry(subdomain).or_insert(0) += 1;
+            }
 
             // Calculate entropy for non-TLD labels
             for label in &query.labels[..query.labels.len() - 2] {
@@ -747,5 +768,112 @@ mod tests {
         let ports = vec![53, 5353, 8053];
         assert!(is_dns_port_in(8053, &ports));
         assert!(!is_dns_port_in(80, &ports));
+    }
+
+    #[test]
+    fn test_entropy_uniform_distribution() {
+        // All unique bytes — should have high entropy
+        let s: String = (b'a'..=b'z').map(|c| c as char).collect();
+        let entropy = calculate_entropy(&s);
+        assert!(
+            entropy > 4.0,
+            "26 unique chars should have entropy > 4.0, got {}",
+            entropy
+        );
+    }
+
+    #[test]
+    fn test_parse_dns_query_zero_qdcount() {
+        let mut payload = [0u8; 20];
+        // QR=0 (query), qdcount=0
+        payload[4] = 0;
+        payload[5] = 0;
+        assert!(parse_dns_query(&payload).is_none());
+    }
+
+    #[test]
+    fn test_parse_dns_query_label_too_long() {
+        let mut payload = Vec::new();
+        // Header (12 bytes)
+        payload.extend_from_slice(&[0u8; 4]); // ID + flags (QR=0)
+        payload.extend_from_slice(&[0x00, 0x01]); // qdcount=1
+        payload.extend_from_slice(&[0u8; 6]); // rest of header
+                                              // Label with length 64 (> 63 max)
+        payload.push(64);
+        payload.extend_from_slice(&[b'a'; 64]);
+        payload.push(0);
+        payload.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // qtype, qclass
+
+        assert!(parse_dns_query(&payload).is_none());
+    }
+
+    #[test]
+    fn test_parse_dns_query_non_utf8_label() {
+        let mut payload = Vec::new();
+        // Header
+        payload.extend_from_slice(&[0u8; 4]);
+        payload.extend_from_slice(&[0x00, 0x01]); // qdcount=1
+        payload.extend_from_slice(&[0u8; 6]);
+        // Label with non-UTF8 bytes
+        payload.push(3);
+        payload.extend_from_slice(&[0xff, 0xfe, 0xfd]);
+        // Second label
+        payload.push(3);
+        payload.extend_from_slice(b"com");
+        payload.push(0);
+        payload.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+
+        let result = parse_dns_query(&payload);
+        assert!(result.is_some(), "Non-UTF8 labels should be hex-encoded");
+        let query = result.unwrap();
+        // First label should be hex-encoded
+        assert!(query.labels[0].contains("ff"));
+    }
+
+    #[test]
+    fn test_dns_tracker_caps_query_times() {
+        let mut tracker = DnsFlowTracker::new();
+        let query = DnsQuery {
+            qname: "test.example.com".to_string(),
+            labels: vec!["test".to_string(), "example".to_string(), "com".to_string()],
+            qtype: 1,
+            qclass: 1,
+        };
+
+        let base = Utc::now();
+        for i in 0..(MAX_QUERY_TIMES + 500) {
+            tracker.add_query(&query, base + chrono::Duration::milliseconds(i as i64));
+        }
+
+        assert!(
+            tracker.query_times.len() <= MAX_QUERY_TIMES,
+            "query_times should be capped at {}, got {}",
+            MAX_QUERY_TIMES,
+            tracker.query_times.len()
+        );
+    }
+
+    #[test]
+    fn test_dns_tracker_caps_subdomains() {
+        let mut tracker = DnsFlowTracker::new();
+        let base = Utc::now();
+
+        for i in 0..(MAX_UNIQUE_SUBDOMAINS + 500) {
+            let subdomain = format!("sub{}", i);
+            let query = DnsQuery {
+                qname: format!("{}.example.com", subdomain),
+                labels: vec![subdomain, "example".to_string(), "com".to_string()],
+                qtype: 1,
+                qclass: 1,
+            };
+            tracker.add_query(&query, base + chrono::Duration::milliseconds(i as i64));
+        }
+
+        assert!(
+            tracker.unique_subdomains.len() <= MAX_UNIQUE_SUBDOMAINS,
+            "unique_subdomains should be capped at {}, got {}",
+            MAX_UNIQUE_SUBDOMAINS,
+            tracker.unique_subdomains.len()
+        );
     }
 }
