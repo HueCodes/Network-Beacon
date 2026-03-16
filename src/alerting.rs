@@ -15,16 +15,29 @@ use tracing::{debug, error, info, trace, warn};
 use crate::analyzer::FlowAnalysis;
 use crate::geo::GeoInfo;
 
+/// Sanitizes a string for safe inclusion in log messages by replacing
+/// control characters (newlines, carriage returns, tabs, null bytes, etc.)
+/// with underscores to prevent log injection attacks.
+fn sanitize_log_field(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '_' } else { c })
+        .collect()
+}
+
 /// Severity level for alerts.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum AlertSeverity {
+    /// Low severity alert.
     Low,
+    /// Medium severity alert (default).
     #[default]
     Medium,
+    /// High severity alert.
     High,
+    /// Critical severity alert.
     Critical,
 }
 
@@ -57,10 +70,15 @@ impl std::str::FromStr for AlertSeverity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DetectionType {
+    /// Periodic beaconing behavior detected.
     Beacon,
+    /// DNS tunneling detected.
     DnsTunneling,
+    /// Known malicious JA3 fingerprint matched.
     MaliciousJa3,
+    /// Destination in a high-risk geographic region.
     HighRiskGeo,
+    /// Protocol running on a nonstandard port.
     ProtocolMismatch,
 }
 
@@ -79,28 +97,44 @@ impl std::fmt::Display for DetectionType {
 /// Alert payload sent to webhooks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alert {
+    /// Timestamp when the alert was generated.
     pub timestamp: DateTime<Utc>,
+    /// Severity level of the alert.
     pub severity: AlertSeverity,
+    /// Type of detection that triggered this alert.
     pub detection_type: DetectionType,
+    /// Source IP address of the suspicious flow.
     pub source_ip: String,
+    /// Destination IP address of the suspicious flow.
     pub dest_ip: String,
+    /// Destination port of the suspicious flow.
     pub dest_port: u16,
+    /// Destination country code (if GeoIP available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dest_country: Option<String>,
+    /// Destination ASN (if GeoIP available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dest_asn: Option<u32>,
+    /// Destination ASN organization (if GeoIP available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dest_org: Option<String>,
+    /// Geographic risk level (if GeoIP available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub geo_risk: Option<String>,
+    /// Coefficient of variation of inter-packet intervals.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cv_value: Option<f64>,
+    /// JA3 fingerprint hash (if TLS).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ja3_hash: Option<String>,
+    /// Matched malicious JA3 description (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ja3_match: Option<String>,
+    /// Total packets in the flow.
     pub packet_count: u64,
+    /// Duration of the flow in seconds.
     pub flow_duration_secs: i64,
+    /// Detection indicators for this flow.
     pub indicators: Vec<String>,
 }
 
@@ -139,16 +173,23 @@ impl Alert {
     }
 
     /// Converts the alert to a syslog message.
+    ///
+    /// All variable fields are sanitized to prevent log injection attacks.
     pub fn to_syslog_message(&self) -> String {
+        let sanitized_indicators: Vec<String> = self
+            .indicators
+            .iter()
+            .map(|i| sanitize_log_field(i))
+            .collect();
         format!(
             "network-beacon: severity={} type={} src={} dst={}:{} packets={} indicators={}",
             self.severity,
             self.detection_type,
-            self.source_ip,
-            self.dest_ip,
+            sanitize_log_field(&self.source_ip),
+            sanitize_log_field(&self.dest_ip),
             self.dest_port,
             self.packet_count,
-            self.indicators.join(",")
+            sanitized_indicators.join(",")
         )
     }
 }
@@ -560,6 +601,36 @@ pub fn new_shared_alert_service(config: AlertingConfig) -> SharedAlertService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analyzer::FlowClassification;
+    use crate::capture::{FlowKey, Protocol};
+    use crate::dns_detector::DnsAnalysisResult;
+    use crate::tls_fingerprint::{ThreatCategory, TlsFingerprint, TlsStatus, TlsVersionInfo};
+    use std::net::IpAddr;
+
+    /// Helper to create a minimal FlowAnalysis for testing.
+    fn make_test_flow() -> FlowAnalysis {
+        let flow_key = FlowKey::new(
+            "192.168.1.1".parse::<IpAddr>().unwrap(),
+            "10.0.0.1".parse::<IpAddr>().unwrap(),
+            443,
+            Protocol::Tcp,
+        );
+        FlowAnalysis {
+            flow_key,
+            classification: FlowClassification::Moderate,
+            cv: Some(0.5),
+            mean_interval_ms: Some(60000.0),
+            packet_count: 100,
+            total_bytes: 50000,
+            duration_secs: 3600,
+            tls_fingerprint: None,
+            tls_status: TlsStatus::Plaintext,
+            dns_analysis: None,
+            http_analysis: None,
+            indicators: vec![],
+            geo_info: None,
+        }
+    }
 
     #[test]
     fn test_alert_severity_ordering() {
@@ -681,5 +752,111 @@ mod tests {
             format!("{}", DetectionType::ProtocolMismatch),
             "protocol_mismatch"
         );
+    }
+
+    #[test]
+    fn test_syslog_message_sanitizes_control_chars() {
+        let alert = Alert {
+            timestamp: Utc::now(),
+            severity: AlertSeverity::High,
+            detection_type: DetectionType::Beacon,
+            source_ip: "192.168.1.1".to_string(),
+            dest_ip: "10.0.0.1".to_string(),
+            dest_port: 443,
+            dest_country: None,
+            dest_asn: None,
+            dest_org: None,
+            geo_risk: None,
+            cv_value: None,
+            ja3_hash: None,
+            ja3_match: None,
+            packet_count: 10,
+            flow_duration_secs: 60,
+            indicators: vec![
+                "indicator\nwith_newline".to_string(),
+                "indicator\rwith_cr".to_string(),
+                "indicator\twith_tab".to_string(),
+            ],
+        };
+
+        let msg = alert.to_syslog_message();
+        assert!(!msg.contains('\n'));
+        assert!(!msg.contains('\r'));
+        assert!(!msg.contains('\t'));
+        assert!(msg.contains("indicator_with_newline"));
+        assert!(msg.contains("indicator_with_cr"));
+        assert!(msg.contains("indicator_with_tab"));
+    }
+
+    #[test]
+    fn test_determine_severity_malicious_ja3() {
+        let mut flow = make_test_flow();
+        flow.tls_fingerprint = Some(TlsFingerprint {
+            fingerprint: "test".to_string(),
+            ja3_hash: "abc123".to_string(),
+            ja3_string: "test".to_string(),
+            tls_version: TlsVersionInfo::Tls12,
+            cipher_count: 5,
+            extension_count: 3,
+            sni: None,
+            is_known_good: false,
+            known_match: None,
+            is_known_malicious: true,
+            malicious_match: Some("CobaltStrike".to_string()),
+            threat_category: Some(ThreatCategory::C2Framework),
+        });
+
+        let severity = AlertService::determine_severity(&flow, None);
+        assert_eq!(severity, AlertSeverity::Critical);
+    }
+
+    #[test]
+    fn test_determine_severity_highly_periodic() {
+        let mut flow = make_test_flow();
+        flow.classification = FlowClassification::HighlyPeriodic;
+
+        let severity = AlertService::determine_severity(&flow, None);
+        assert_eq!(severity, AlertSeverity::Critical);
+    }
+
+    #[test]
+    fn test_determine_detection_type_dns() {
+        let mut flow = make_test_flow();
+        flow.dns_analysis = Some(DnsAnalysisResult {
+            is_suspicious: true,
+            max_entropy: 4.5,
+            max_label_length: 60,
+            query_rate: 10.0,
+            indicators: vec![],
+            query_count: 100,
+        });
+
+        let dt = AlertService::determine_detection_type(&flow);
+        assert!(matches!(dt, DetectionType::DnsTunneling));
+    }
+
+    #[test]
+    fn test_determine_detection_type_protocol_mismatch() {
+        let mut flow = make_test_flow();
+        flow.indicators = vec!["tls_on_nonstandard_port".to_string()];
+
+        let dt = AlertService::determine_detection_type(&flow);
+        assert!(matches!(dt, DetectionType::ProtocolMismatch));
+    }
+
+    #[test]
+    fn test_alert_from_flow() {
+        let flow = make_test_flow();
+        let alert = Alert::from_flow(&flow, DetectionType::Beacon, AlertSeverity::High, None);
+
+        assert_eq!(alert.source_ip, "192.168.1.1");
+        assert_eq!(alert.dest_ip, "10.0.0.1");
+        assert_eq!(alert.dest_port, 443);
+        assert_eq!(alert.severity, AlertSeverity::High);
+        assert!(matches!(alert.detection_type, DetectionType::Beacon));
+        assert_eq!(alert.packet_count, 100);
+        assert_eq!(alert.flow_duration_secs, 3600);
+        assert!(alert.dest_country.is_none());
+        assert!(alert.ja3_hash.is_none());
     }
 }
