@@ -94,17 +94,24 @@ impl std::fmt::Display for FlowClassification {
 }
 
 /// Trait for beacon detection algorithms.
-/// Allows for extensibility with different detection strategies.
+///
+/// Implementors analyze a series of inter-packet intervals (in milliseconds)
+/// and produce a [`DetectionResult`] classifying the traffic pattern.
+/// This trait allows for extensibility with different detection strategies
+/// beyond the default CV-based approach.
 pub trait Detector: Send + Sync {
-    /// Analyzes a series of intervals and returns a detection result.
+    /// Analyzes a series of intervals (in milliseconds) and returns a detection result.
     fn analyze(&self, intervals_ms: &[f64]) -> DetectionResult;
 
-    /// Returns the minimum number of samples required for analysis.
+    /// Returns the minimum number of samples required for meaningful analysis.
     #[allow(dead_code)]
     fn min_samples(&self) -> usize;
 }
 
-/// Result of beacon detection analysis.
+/// Result of beacon detection analysis for a single flow.
+///
+/// Contains the classification, statistical measures, and sample count
+/// that were used to arrive at the classification.
 #[derive(Debug, Clone)]
 pub struct DetectionResult {
     pub classification: FlowClassification,
@@ -129,7 +136,10 @@ impl DetectionResult {
     }
 }
 
-/// Default CV-based beacon detector.
+/// Default Coefficient of Variation (CV) based beacon detector.
+///
+/// Computes CV = σ/μ of inter-packet intervals. Low CV values indicate
+/// highly periodic traffic characteristic of C2 beacons.
 pub struct CvDetector {
     min_samples: usize,
 }
@@ -243,7 +253,11 @@ pub fn timestamps_to_deltas(timestamps: &[DateTime<Utc>]) -> Vec<f64> {
         .collect()
 }
 
-/// Aggregated data for a single flow.
+/// Aggregated data for a single network flow.
+///
+/// Tracks timestamps, byte counts, and protocol-specific analysis state
+/// (TLS fingerprinting, DNS tunneling detection, HTTP beacon detection)
+/// for a unique (src_ip, dst_ip, dst_port, protocol) tuple.
 #[derive(Debug, Clone)]
 pub struct FlowData {
     pub flow_key: FlowKey,
@@ -374,11 +388,11 @@ impl FlowData {
         (None, TlsStatus::Plaintext)
     }
 
-    /// Adds a new event to this flow's data.
+    /// Adds a new event to this flow's data, updating counters and protocol-specific trackers.
     pub fn add_event(&mut self, event: &FlowEvent, detection_config: &DetectionConfig) {
         self.timestamps.push(event.timestamp);
-        self.total_bytes += event.packet_size as u64;
-        self.packet_count += 1;
+        self.total_bytes = self.total_bytes.saturating_add(event.packet_size as u64);
+        self.packet_count = self.packet_count.saturating_add(1);
         self.last_seen = event.timestamp;
 
         // Try to extract TLS fingerprint if we don't have one yet
@@ -490,7 +504,11 @@ pub struct FlowAnalysis {
     pub geo_info: Option<GeoInfo>,
 }
 
-/// The main flow analyzer - consumes FlowEvents and performs analysis.
+/// The main flow analyzer — consumes [`FlowEvent`]s and performs periodic analysis.
+///
+/// Maintains an LRU cache of active flows and runs CV-based beacon detection,
+/// DNS tunneling analysis, HTTP beacon detection, and TLS fingerprint matching
+/// on each analysis cycle.
 pub struct FlowAnalyzer {
     config: AnalyzerConfig,
     detection_config: DetectionConfig,
@@ -529,9 +547,9 @@ impl FlowAnalyzer {
         self
     }
 
-    /// Processes a single flow event.
+    /// Processes a single flow event, updating the corresponding flow or creating a new one.
     pub fn process_event(&mut self, event: FlowEvent) {
-        self.events_processed += 1;
+        self.events_processed = self.events_processed.saturating_add(1);
 
         if let Some(flow_data) = self.flows.get_mut(&event.flow_key) {
             flow_data.add_event(&event, &self.detection_config);
@@ -785,6 +803,10 @@ pub struct AnalyzerStats {
 }
 
 /// Async task that runs the analyzer loop.
+///
+/// Consumes [`FlowEvent`]s from the capture channel, periodically runs
+/// analysis on all active flows, and sends [`AnalysisReport`]s to the UI/output.
+/// Exits when the event channel is closed (capture stopped).
 pub async fn run_analyzer(
     mut rx: mpsc::Receiver<FlowEvent>,
     report_tx: mpsc::Sender<AnalysisReport>,
@@ -1138,6 +1160,164 @@ mod tests {
 
         let default_detector = CvDetector::default();
         assert_eq!(default_detector.min_samples(), 5);
+    }
+
+    #[test]
+    fn test_cv_at_exact_threshold_boundaries() {
+        // CV exactly at 0.1 boundary — should be JitteredPeriodic, not HighlyPeriodic
+        assert_eq!(
+            FlowClassification::from_cv(0.1),
+            FlowClassification::JitteredPeriodic
+        );
+        // CV exactly at 0.5 boundary — should be Moderate
+        assert_eq!(
+            FlowClassification::from_cv(0.5),
+            FlowClassification::Moderate
+        );
+        // CV exactly at 1.0 boundary — should be Stochastic
+        assert_eq!(
+            FlowClassification::from_cv(1.0),
+            FlowClassification::Stochastic
+        );
+    }
+
+    #[test]
+    fn test_cv_nan_handling() {
+        // NaN should not match any range, falls through to Stochastic
+        let class = FlowClassification::from_cv(f64::NAN);
+        assert_eq!(class, FlowClassification::Stochastic);
+    }
+
+    #[test]
+    fn test_cv_negative_value() {
+        // Negative CV (shouldn't happen but verify robustness)
+        let class = FlowClassification::from_cv(-0.5);
+        assert_eq!(class, FlowClassification::HighlyPeriodic);
+    }
+
+    #[test]
+    fn test_statistics_identical_values() {
+        let intervals = vec![500.0, 500.0, 500.0, 500.0, 500.0];
+        let stats = calculate_statistics(&intervals);
+        assert!((stats.mean - 500.0).abs() < 0.01);
+        assert!(stats.std_dev < 0.01);
+        assert!(stats.cv < 0.001 || stats.cv == 0.0);
+    }
+
+    #[test]
+    fn test_statistics_large_values() {
+        // Very large interval values (near u32::MAX in ms)
+        let big = 4_000_000_000.0_f64;
+        let intervals = vec![big, big, big, big, big];
+        let stats = calculate_statistics(&intervals);
+        assert!((stats.mean - big).abs() < 1.0);
+        assert!(stats.cv.is_finite());
+    }
+
+    #[test]
+    fn test_flow_data_timestamp_trimming() {
+        let config = AnalyzerConfig {
+            max_timestamps_per_flow: 5,
+            ..AnalyzerConfig::default()
+        };
+        let detection_config = DetectionConfig::default();
+        let mut analyzer = FlowAnalyzer::new(config, detection_config);
+
+        let flow_key = FlowKey::new(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            443,
+            Protocol::Tcp,
+        );
+
+        let base_time = Utc::now();
+        for i in 0..10 {
+            analyzer.process_event(FlowEvent {
+                flow_key: flow_key.clone(),
+                timestamp: base_time + chrono::Duration::seconds(i),
+                packet_size: 100,
+                tls_payload: None,
+                dns_payload: None,
+                http_payload: None,
+            });
+        }
+
+        // The flow should exist with at most max_timestamps_per_flow timestamps
+        // We can't directly access flows, but the analyzer should not panic
+        let report = analyzer.analyze_all();
+        assert_eq!(report.total_flows, 1);
+    }
+
+    #[test]
+    fn test_flow_analyzer_multiple_flows() {
+        let config = AnalyzerConfig::default();
+        let detection_config = DetectionConfig::default();
+        let mut analyzer = FlowAnalyzer::new(config, detection_config);
+
+        // Create 3 different flows
+        for i in 0..3u8 {
+            let flow_key = FlowKey::new(
+                format!("10.0.0.{}", i).parse().unwrap(),
+                "10.0.0.100".parse().unwrap(),
+                443,
+                Protocol::Tcp,
+            );
+            analyzer.process_event(FlowEvent {
+                flow_key,
+                timestamp: Utc::now(),
+                packet_size: 100,
+                tls_payload: None,
+                dns_payload: None,
+                http_payload: None,
+            });
+        }
+
+        let stats = analyzer.stats();
+        assert_eq!(stats.total_flows, 3);
+        assert_eq!(stats.events_processed, 3);
+    }
+
+    #[test]
+    fn test_flow_data_duration() {
+        let detection_config = DetectionConfig::default();
+        let base_time = Utc::now();
+        let event1 = FlowEvent {
+            flow_key: FlowKey::new(
+                "10.0.0.1".parse().unwrap(),
+                "10.0.0.2".parse().unwrap(),
+                80,
+                Protocol::Tcp,
+            ),
+            timestamp: base_time,
+            packet_size: 100,
+            tls_payload: None,
+            dns_payload: None,
+            http_payload: None,
+        };
+        let mut flow = FlowData::new(&event1, &detection_config);
+        let event2 = FlowEvent {
+            flow_key: event1.flow_key.clone(),
+            timestamp: base_time + chrono::Duration::seconds(60),
+            packet_size: 200,
+            tls_payload: None,
+            dns_payload: None,
+            http_payload: None,
+        };
+        flow.add_event(&event2, &detection_config);
+
+        assert_eq!(flow.duration().num_seconds(), 60);
+        assert_eq!(flow.packet_count, 2);
+        assert_eq!(flow.total_bytes, 300);
+    }
+
+    #[test]
+    fn test_analyzer_config_default() {
+        let config = AnalyzerConfig::default();
+        assert_eq!(config.max_flows, 10_000);
+        assert_eq!(config.max_timestamps_per_flow, 1_000);
+        assert_eq!(config.analysis_interval_secs, 10);
+        assert_eq!(config.min_samples, 5);
+        assert_eq!(config.flow_ttl_secs, 300);
     }
 
     use crate::config::DetectionConfig;
