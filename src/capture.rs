@@ -22,12 +22,18 @@ use crate::http_detector::is_http_port;
 use crate::tls_fingerprint::is_tls_port;
 
 /// Unique identifier for a network flow.
-/// Composed of source IP, destination IP, and destination port.
+///
+/// A flow is identified by the tuple `(src_ip, dst_ip, dst_port, protocol)`.
+/// Source port is intentionally excluded to group ephemeral-port variations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlowKey {
+    /// Source IP address.
     pub src_ip: IpAddr,
+    /// Destination IP address.
     pub dst_ip: IpAddr,
+    /// Destination port number.
     pub dst_port: u16,
+    /// Transport protocol (TCP, UDP, or other).
     pub protocol: Protocol,
 }
 
@@ -228,9 +234,12 @@ impl PacketCapture {
         Ok(())
     }
 
-    /// Parses a raw packet and extracts flow metadata.
-    /// Returns None if the packet cannot be parsed or is not IP-based.
-    fn parse_packet(data: &[u8], ts: libc::timeval) -> Option<FlowEvent> {
+    /// Parses a raw Ethernet packet and extracts flow metadata.
+    ///
+    /// Returns `None` if the packet is not IP-based, has no TCP/UDP transport,
+    /// or has an invalid timestamp. Payload extraction is bounded to prevent
+    /// excessive memory use (512 bytes for TLS/DNS, 2048 for HTTP).
+    pub(crate) fn parse_packet(data: &[u8], ts: libc::timeval) -> Option<FlowEvent> {
         let sliced = SlicedPacket::from_ethernet(data).ok()?;
 
         // Extract IP addresses
@@ -390,7 +399,7 @@ impl PacketCapture {
         Some(FlowEvent {
             flow_key,
             timestamp,
-            packet_size: data.len() as u32,
+            packet_size: u32::try_from(data.len()).unwrap_or(u32::MAX),
             tls_payload,
             dns_payload,
             http_payload,
@@ -455,5 +464,71 @@ mod tests {
         assert_eq!(format!("{}", Protocol::Tcp), "TCP");
         assert_eq!(format!("{}", Protocol::Udp), "UDP");
         assert_eq!(format!("{}", Protocol::Other(17)), "PROTO:17");
+    }
+
+    #[test]
+    fn test_parse_packet_empty_data() {
+        let ts = libc::timeval {
+            tv_sec: 1000,
+            tv_usec: 0,
+        };
+        assert!(PacketCapture::parse_packet(&[], ts).is_none());
+    }
+
+    #[test]
+    fn test_parse_packet_too_short() {
+        let ts = libc::timeval {
+            tv_sec: 1000,
+            tv_usec: 0,
+        };
+        assert!(PacketCapture::parse_packet(&[0u8; 5], ts).is_none());
+    }
+
+    #[test]
+    fn test_parse_packet_invalid_ethernet() {
+        // Random bytes that don't form a valid Ethernet frame
+        let ts = libc::timeval {
+            tv_sec: 1000,
+            tv_usec: 0,
+        };
+        assert!(PacketCapture::parse_packet(&[0xffu8; 64], ts).is_none());
+    }
+
+    #[test]
+    fn test_flow_key_hash_consistency() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let key1 = FlowKey::new(
+            "192.168.1.1".parse().unwrap(),
+            "10.0.0.1".parse().unwrap(),
+            443,
+            Protocol::Tcp,
+        );
+        let key2 = key1.clone();
+
+        let mut h1 = DefaultHasher::new();
+        let mut h2 = DefaultHasher::new();
+        key1.hash(&mut h1);
+        key2.hash(&mut h2);
+
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    #[test]
+    fn test_capture_config_default() {
+        let config = CaptureConfig::default();
+        assert!(config.device.is_none());
+        assert!(config.filter.is_none());
+        assert_eq!(config.channel_capacity, 10_000);
+        assert!(config.promiscuous);
+        assert_eq!(config.timeout_ms, 100);
+    }
+
+    #[test]
+    fn test_protocol_other_equality() {
+        assert_eq!(Protocol::Other(6), Protocol::Other(6));
+        assert_ne!(Protocol::Other(6), Protocol::Other(17));
+        assert_ne!(Protocol::Tcp, Protocol::Other(6));
     }
 }

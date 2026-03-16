@@ -18,14 +18,16 @@ use crate::capture::{FlowEvent, FlowKey, Protocol};
 use crate::dns_detector::is_dns_port;
 use crate::http_detector::is_http_port;
 
-/// Configuration for PCAP replay
+/// Configuration for PCAP replay.
+///
+/// Controls replay speed, event limits, and internal channel sizing.
 #[derive(Debug, Clone)]
 pub struct ReplayConfig {
-    /// Speed multiplier (1.0 = realtime, 10.0 = 10x faster, 0.0 = as fast as possible)
+    /// Speed multiplier: 1.0 = realtime, 10.0 = 10x faster, 0.0 = as fast as possible.
     pub speed: f64,
-    /// Maximum events to replay (0 = unlimited)
+    /// Maximum events to replay (0 = unlimited).
     pub max_events: usize,
-    /// Channel buffer size
+    /// Channel buffer size for flow events.
     pub channel_size: usize,
 }
 
@@ -77,12 +79,16 @@ impl PcapReplay {
     }
 }
 
-/// Statistics from a replay session
+/// Statistics from a completed replay session.
 #[derive(Debug, Clone, Default)]
 pub struct ReplayStats {
+    /// Total packets read from the PCAP file.
     pub packets_processed: usize,
+    /// Flow events successfully sent to the analyzer.
     pub events_sent: usize,
+    /// Packets skipped (non-IP, unparseable, or invalid timestamp).
     pub packets_skipped: usize,
+    /// Wall-clock duration of the replay in milliseconds.
     pub duration_ms: u64,
 }
 
@@ -332,7 +338,7 @@ fn parse_pcap_packet(data: &[u8], timestamp: DateTime<Utc>) -> Option<FlowEvent>
     Some(FlowEvent {
         flow_key,
         timestamp,
-        packet_size: data.len() as u32,
+        packet_size: u32::try_from(data.len()).unwrap_or(u32::MAX),
         tls_payload,
         dns_payload,
         http_payload,
@@ -457,5 +463,41 @@ mod tests {
         assert_eq!(replay.config.speed, 2.0);
         assert_eq!(replay.config.max_events, 100);
         assert_eq!(replay.config.channel_size, 500);
+    }
+
+    #[test]
+    fn test_parse_pcap_packet_empty() {
+        let ts = Utc::now();
+        assert!(parse_pcap_packet(&[], ts).is_none());
+    }
+
+    #[test]
+    fn test_parse_pcap_packet_too_short() {
+        let ts = Utc::now();
+        assert!(parse_pcap_packet(&[0u8; 10], ts).is_none());
+    }
+
+    #[test]
+    fn test_validate_pcap_file_pcapng_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("valid.pcapng");
+        let mut data = vec![0x0a, 0x0d, 0x0d, 0x0a]; // PCAPNG magic
+        data.extend_from_slice(&[0u8; 20]);
+        std::fs::write(&file_path, &data).unwrap();
+
+        let result = validate_pcap_file(&file_path);
+        assert!(result.is_ok(), "Should accept PCAPNG magic bytes");
+    }
+
+    #[test]
+    fn test_replay_config_custom() {
+        let config = ReplayConfig {
+            speed: 5.0,
+            max_events: 500,
+            channel_size: 2000,
+        };
+        assert_eq!(config.speed, 5.0);
+        assert_eq!(config.max_events, 500);
+        assert_eq!(config.channel_size, 2000);
     }
 }
