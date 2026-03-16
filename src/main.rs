@@ -391,12 +391,9 @@ async fn run_capture(
     let metrics_shutdown = std::sync::Arc::new(tokio::sync::RwLock::new(false));
     let metrics_handle = if config.metrics.enabled {
         let metrics_config = MetricsServerConfig {
-            bind_address: metrics_bind.parse().unwrap_or_else(|_| {
-                crate::config::MetricsConfig::default()
-                    .bind_address
-                    .parse()
-                    .unwrap()
-            }),
+            bind_address: metrics_bind
+                .parse()
+                .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 9090))),
             metrics_path: config.metrics.metrics_path.clone(),
         };
         let m = metrics.clone();

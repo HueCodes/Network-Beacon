@@ -18,41 +18,41 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::analyzer::AnalysisReport;
 
 /// Atomic metrics counters for thread-safe updates.
 #[derive(Debug)]
 pub struct Metrics {
-    /// Total packets captured (incremented by capture module)
+    /// Total packets captured (incremented by capture module).
     pub packets_total: AtomicU64,
-    /// Total unique flows ever seen
+    /// Total unique flows ever seen.
     pub flows_total: AtomicU64,
-    /// Currently active flows
+    /// Currently active flows.
     pub flows_active: AtomicU64,
-    /// Suspicious flows detected
+    /// Suspicious flows detected.
     pub suspicious_flows: AtomicU64,
-    /// Total events processed by analyzer
+    /// Total events processed by analyzer.
     pub events_processed: AtomicU64,
-    /// DNS tunneling detections
+    /// DNS tunneling detections.
     pub dns_tunneling_detections: AtomicU64,
-    /// Malicious JA3 fingerprint matches
+    /// Malicious JA3 fingerprint matches.
     pub malicious_ja3_detections: AtomicU64,
-    /// HTTP beacon pattern detections
+    /// HTTP beacon pattern detections.
     pub http_beacon_detections: AtomicU64,
-    /// Protocol mismatch detections
+    /// Protocol mismatch detections.
     pub protocol_mismatch_detections: AtomicU64,
-    /// Periodic beacon detections (CV-based)
+    /// Periodic beacon detections (CV-based).
     pub periodic_beacon_detections: AtomicU64,
-    /// High-risk geographic destination flows
+    /// High-risk geographic destination flows.
     pub geo_high_risk_flows: AtomicU64,
-    /// Total alerts sent
+    /// Total alerts sent.
     pub alerts_sent_total: AtomicU64,
-    /// Last analysis timestamp (Unix epoch milliseconds)
+    /// Last analysis timestamp (Unix epoch milliseconds).
     pub last_analysis_timestamp: AtomicU64,
 }
 
@@ -302,7 +302,7 @@ pub struct MetricsServerConfig {
 impl Default for MetricsServerConfig {
     fn default() -> Self {
         Self {
-            bind_address: "127.0.0.1:9090".parse().unwrap(),
+            bind_address: SocketAddr::from(([127, 0, 0, 1], 9090)),
             metrics_path: "/metrics".to_string(),
         }
     }
@@ -312,6 +312,7 @@ impl Default for MetricsServerConfig {
 ///
 /// This is a minimal HTTP server that only responds to GET requests on the metrics path.
 /// It's designed to be lightweight and not add external HTTP framework dependencies.
+/// Each accepted connection is given a 5-second read timeout to prevent slowloris attacks.
 pub async fn run_metrics_server(
     config: MetricsServerConfig,
     metrics: SharedMetrics,
@@ -348,19 +349,20 @@ pub async fn run_metrics_server(
 
         debug!("Metrics request from {}", addr);
 
-        // Read request (we only care about GET /metrics)
-        let mut buf = [0u8; 1024];
-        let n = match socket.try_read(&mut buf) {
-            Ok(n) => n,
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Wait for data
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                match socket.try_read(&mut buf) {
-                    Ok(n) => n,
-                    Err(_) => continue,
-                }
+        // Read request with a 5-second overall timeout to prevent slowloris attacks
+        let mut buf = [0u8; 4096];
+        let n = match tokio::time::timeout(std::time::Duration::from_secs(5), socket.read(&mut buf))
+            .await
+        {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => {
+                debug!("Read error from {}: {}", addr, e);
+                continue;
             }
-            Err(_) => continue,
+            Err(_) => {
+                warn!("Read timeout from {}, closing connection", addr);
+                continue;
+            }
         };
 
         if n == 0 {
@@ -519,6 +521,61 @@ mod tests {
     fn test_default_config() {
         let config = MetricsServerConfig::default();
         assert_eq!(config.bind_address.port(), 9090);
+        assert_eq!(config.metrics_path, "/metrics");
+    }
+
+    #[test]
+    fn test_metrics_inc_alerts() {
+        let metrics = Metrics::new();
+        assert_eq!(metrics.alerts_sent_total.load(Ordering::Relaxed), 0);
+
+        metrics.inc_alerts();
+        assert_eq!(metrics.alerts_sent_total.load(Ordering::Relaxed), 1);
+
+        metrics.inc_alerts();
+        metrics.inc_alerts();
+        assert_eq!(metrics.alerts_sent_total.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_prometheus_format_contains_all_metrics() {
+        let metrics = Metrics::new();
+        let output = metrics.to_prometheus_format();
+
+        let expected_metrics = [
+            "network_beacon_packets_total",
+            "network_beacon_flows_total",
+            "network_beacon_flows_active",
+            "network_beacon_suspicious_flows",
+            "network_beacon_events_processed",
+            "network_beacon_dns_tunneling_detections",
+            "network_beacon_malicious_ja3_detections",
+            "network_beacon_http_beacon_detections",
+            "network_beacon_protocol_mismatch_detections",
+            "network_beacon_periodic_detections",
+            "network_beacon_geo_high_risk_flows",
+            "network_beacon_alerts_sent_total",
+            "network_beacon_last_analysis_timestamp",
+        ];
+
+        for metric_name in &expected_metrics {
+            assert!(
+                output.contains(metric_name),
+                "Missing metric: {}",
+                metric_name
+            );
+        }
+
+        assert_eq!(expected_metrics.len(), 13);
+    }
+
+    #[test]
+    fn test_metrics_server_config_default_values() {
+        let config = MetricsServerConfig::default();
+        assert_eq!(
+            config.bind_address,
+            SocketAddr::from(([127, 0, 0, 1], 9090))
+        );
         assert_eq!(config.metrics_path, "/metrics");
     }
 }
