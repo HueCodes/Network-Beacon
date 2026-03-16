@@ -261,8 +261,13 @@ struct ClientHelloData {
     ec_point_formats: Vec<u8>,
 }
 
-/// Attempts to parse a TLS Client Hello from raw TCP payload.
-/// Returns None if the data is not a valid TLS Client Hello.
+/// Attempts to parse a TLS Client Hello from raw TCP payload and extract fingerprints.
+///
+/// Generates both a JA4-style fingerprint and a JA3 fingerprint hash.
+/// Returns `None` if the data is not a valid TLS Client Hello or is too short to parse.
+///
+/// The payload should start with the TLS record header (content type 0x16).
+/// Only the first 512 bytes are typically needed (captured at the packet capture layer).
 pub fn extract_fingerprint(payload: &[u8]) -> Option<TlsFingerprint> {
     if payload.len() < 5 {
         return None;
@@ -933,6 +938,61 @@ mod tests {
             format!("{}", TlsVersionInfo::Unknown(0x0305)),
             "Unknown (0x0305)"
         );
+    }
+
+    #[test]
+    fn test_extract_fingerprint_too_short() {
+        // 1 byte — too short
+        assert!(extract_fingerprint(&[0x16]).is_none());
+        // 4 bytes — still too short
+        assert!(extract_fingerprint(&[0x16, 0x03, 0x01, 0x00]).is_none());
+    }
+
+    #[test]
+    fn test_extract_fingerprint_wrong_content_type() {
+        // Content type 0x17 = Application Data, not Handshake
+        let payload = [0x17, 0x03, 0x03, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert!(extract_fingerprint(&payload).is_none());
+    }
+
+    #[test]
+    fn test_extract_fingerprint_truncated_handshake() {
+        // Valid TLS record header but truncated body
+        let payload = [0x16, 0x03, 0x03, 0x00, 0x10, 0x01, 0x00, 0x00];
+        // Should return None (not panic) on truncated data
+        assert!(extract_fingerprint(&payload).is_none());
+    }
+
+    #[test]
+    fn test_validate_sni_max_valid_length() {
+        // 253 chars is the DNS hostname max — should be valid
+        let sni = "a".repeat(253);
+        assert!(validate_sni(&sni).is_some());
+    }
+
+    #[test]
+    fn test_is_tls_port_in_custom_list() {
+        let ports = vec![443, 8443, 12345];
+        assert!(is_tls_port_in(12345, &ports));
+        assert!(!is_tls_port_in(80, &ports));
+    }
+
+    #[test]
+    fn test_known_malicious_ja3_all_entries_valid() {
+        // Verify all entries in the known malicious list are 32 hex chars
+        for entry in KNOWN_MALICIOUS_JA3 {
+            assert_eq!(
+                entry.ja3_hash.len(),
+                32,
+                "JA3 hash for '{}' should be 32 chars",
+                entry.description
+            );
+            assert!(
+                entry.ja3_hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "JA3 hash for '{}' should be hex",
+                entry.description
+            );
+        }
     }
 
     #[test]

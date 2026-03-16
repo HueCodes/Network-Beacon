@@ -82,7 +82,9 @@ fn truncate_org(org: &str, max_len: usize) -> String {
 /// Configuration for a suspicious ASN.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuspiciousAsn {
+    /// The autonomous system number.
     pub asn: u32,
+    /// Human-readable name for this ASN.
     pub name: String,
 }
 
@@ -280,7 +282,7 @@ pub fn new_shared_geo_lookup(config: &GeoConfig) -> SharedGeoLookup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn test_geo_risk_display() {
@@ -392,5 +394,49 @@ mod tests {
         };
         let risk = lookup.calculate_risk(&info);
         assert_eq!(risk, GeoRisk::High);
+    }
+
+    #[test]
+    fn test_is_private_ipv6_loopback() {
+        assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn test_is_private_ipv6_public() {
+        let public_ipv6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(!is_private_ip(&public_ipv6));
+    }
+
+    #[test]
+    fn test_geo_risk_none_for_normal_country() {
+        let config = GeoConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let lookup = GeoLookup::new(&config);
+
+        let info = GeoInfo {
+            country_code: Some("US".to_string()),
+            ..Default::default()
+        };
+        let risk = lookup.calculate_risk(&info);
+        assert_eq!(risk, GeoRisk::None);
+    }
+
+    #[test]
+    fn test_truncate_org_exact_length() {
+        let org = "ExactlyTwentyChars!!";
+        assert_eq!(org.len(), 20);
+        let result = truncate_org(org, 20);
+        assert_eq!(result, org);
+    }
+
+    #[test]
+    fn test_geo_config_default_high_risk_countries() {
+        let config = GeoConfig::default();
+        assert!(config.high_risk_countries.contains(&"KP".to_string()));
+        assert!(config.high_risk_countries.contains(&"IR".to_string()));
+        assert!(config.high_risk_countries.contains(&"SY".to_string()));
+        assert!(config.high_risk_countries.contains(&"CU".to_string()));
     }
 }

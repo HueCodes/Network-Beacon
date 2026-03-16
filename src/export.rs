@@ -11,7 +11,10 @@ use crate::dns_detector::DnsAnalysisResult;
 use crate::geo::GeoInfo;
 use crate::http_detector::HttpAnalysisResult;
 
-/// Output format for exports
+/// Output format for exporting analysis reports.
+///
+/// Supports plain text for console display, JSON for SIEM integration,
+/// and JSON Lines for streaming/log aggregation pipelines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
     #[default]
@@ -534,5 +537,59 @@ mod tests {
             "jsonlines".parse::<OutputFormat>().unwrap(),
             OutputFormat::JsonLines
         );
+    }
+
+    #[test]
+    fn test_output_format_case_insensitive() {
+        assert_eq!("TEXT".parse::<OutputFormat>().unwrap(), OutputFormat::Text);
+        assert_eq!("JSON".parse::<OutputFormat>().unwrap(), OutputFormat::Json);
+        assert_eq!(
+            "JSONL".parse::<OutputFormat>().unwrap(),
+            OutputFormat::JsonLines
+        );
+    }
+
+    #[test]
+    fn test_export_report_dispatches_correctly() {
+        let report = AnalysisReport {
+            timestamp: Utc::now(),
+            total_flows: 1,
+            active_flows: 1,
+            suspicious_flows: vec![],
+            events_processed: 10,
+        };
+
+        let text = export_report(&report, OutputFormat::Text);
+        assert!(text.contains("Analysis Report"));
+
+        let json = export_report(&report, OutputFormat::Json);
+        assert!(json.contains("\"version\""));
+
+        let jsonl = export_report(&report, OutputFormat::JsonLines);
+        assert!(jsonl.contains("\"type\":\"summary\""));
+    }
+
+    #[test]
+    fn test_format_interval_zero() {
+        assert_eq!(format_interval(Some(0.0)), "0ms");
+    }
+
+    #[test]
+    fn test_format_interval_boundary() {
+        // Exactly 1000ms should display as seconds
+        assert_eq!(format_interval(Some(1000.0)), "1.0s");
+    }
+
+    #[test]
+    fn test_json_report_version() {
+        let report = AnalysisReport {
+            timestamp: Utc::now(),
+            total_flows: 0,
+            active_flows: 0,
+            suspicious_flows: vec![],
+            events_processed: 0,
+        };
+        let json_report = JsonReport::from(&report);
+        assert_eq!(json_report.version, "1.0");
     }
 }

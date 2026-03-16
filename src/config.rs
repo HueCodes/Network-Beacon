@@ -14,7 +14,10 @@ use crate::export::OutputFormat;
 use crate::geo::GeoConfig;
 use crate::http_detector::HttpDetectorConfig;
 
-/// Main configuration structure
+/// Main configuration structure for Network-Beacon.
+///
+/// All fields use `#[serde(default)]` so partial TOML files are accepted.
+/// CLI arguments override values loaded from the config file.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
@@ -518,5 +521,60 @@ high_request_rate_threshold = 60
         assert!(!config.enabled);
         assert_eq!(config.bind_address, "127.0.0.1:9090");
         assert_eq!(config.metrics_path, "/metrics");
+    }
+
+    #[test]
+    fn test_capture_config_default() {
+        let config = CaptureConfig::default();
+        assert!(config.interface.is_none());
+        assert!(config.filter.is_none());
+        assert!(config.promiscuous);
+        assert_eq!(config.timeout_ms, 100);
+        assert_eq!(config.channel_capacity, 10_000);
+        assert_eq!(config.tls_payload_limit, 512);
+        assert_eq!(config.dns_payload_limit, 512);
+        assert_eq!(config.http_payload_limit, 2048);
+    }
+
+    #[test]
+    fn test_validate_negative_cv_threshold() {
+        let mut config = Config::default();
+        config.detection.cv_threshold_periodic = -0.1;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_entropy_threshold_boundary() {
+        // Valid values: (0.0, 8.0) exclusive
+        let mut config = Config::default();
+        config.detection.entropy_threshold = 0.01;
+        assert!(config.validate().is_ok());
+        config.detection.entropy_threshold = 7.99;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_detection_profile_paranoid_min_samples_floor() {
+        // Paranoid with base of 2 should floor at 2 (not go below)
+        assert_eq!(DetectionProfile::Paranoid.adjust_min_samples(2), 2);
+        assert_eq!(DetectionProfile::Paranoid.adjust_min_samples(1), 2);
+    }
+
+    #[test]
+    fn test_config_roundtrip_toml() {
+        let config = Config::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.analyzer.max_flows, config.analyzer.max_flows);
+        assert_eq!(
+            parsed.detection.cv_threshold_periodic,
+            config.detection.cv_threshold_periodic
+        );
+    }
+
+    #[test]
+    fn test_load_nonexistent_config_returns_default() {
+        let config = Config::load_or_default(Some(std::path::Path::new("/nonexistent/path.toml")));
+        assert_eq!(config.analyzer.max_flows, 10_000);
     }
 }
